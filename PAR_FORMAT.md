@@ -81,9 +81,14 @@ ID  Name       Size     Encoding
 ### Array Format Detail
 
 ```
-+0x00   4     uint32   Element count (K)
-+0x04   var   type[K]  K values of the element type
++0x00   8     uint64   Lead word: 0 = empty array, and then NOTHING follows (no count)
++0x08   4     uint32   Element count (K)          - only when the lead word is not 0
++0x0C   var   type[K]  K values of the element type
 ```
+
+Measured on all 5155 entries of the Update16 par (16.09.2026): the lead
+word is 0 or 1. Reading the count straight away throws a parser off at the
+first empty array - that is how earlier versions died mid-file.
 
 For string arrays (type 7), each element is a Delphi string (uint32 length + bytes).
 
@@ -94,44 +99,37 @@ For string arrays (type 7), each element is a Delphi string (uint32 length + byt
 +0x04   n     char[n]  ASCII string data (no null terminator)
 ```
 
-## Field-Count Categories
+## Sheets: which names belong to a list
 
-The PAR format has no explicit type/schema system. Instead, all entries with the same number of fields share the same column layout. The SDK defines these layouts via Excel sheets:
+The PAR has no schema. Field names come from the SDK's `TwoWorlds.xls`, one
+sheet per kind of object (39 sheets, 2055 columns; see `tw1_sdk_fields.json`).
+
+**Every list in the .par is exactly one sheet.** The editor resolves the
+sheet from the entry NAMES of a list (`TRAP_01` is a trap in the SDK,
+`WP_STAFF_01` a staff) and takes the majority. Measured against
+`WDFiles\Update16.wd` - the par the game runs: 608 of 609 lists resolve,
+all with the exact column count; the remaining list is `--NULL--`.
+
+Do **not** pick the sheet by counting fields. Nine pairs share a count and
+the old count-based lookup mislabelled 414 of 609 lists:
 
 ```
-Field Count → SDK Sheet → Object Type
-───────────────────────────────────────
-  1         SoundPacksSet, CameraTracks, SpecialUpdatesLinks
-  2         PierceMissileSlots
-  6         SoundPack, UnitTalks
-  9         MeshButtonViewParams
- 16         SimplePassives
- 17         Dynamics
- 21         UnitMeshes
- 22         Equipment
- 26         BasicUnits, BasicUnitsAnimations
- 30         Passives, Markers, RollingStones
- 33         Containers
- 35         Gates
- 39         CustomArtefacts
- 42         Teleports
- 43         EquipmentArtefacts
- 47         SpecialArtefacts
- 49         Missiles, AlchemyFormulaArtefacts
- 52         InventoryDialogParams
- 53         MagicCard
- 64         CustomScalers
- 65         Units, ShopUnits
- 67         Weapon
- 68         CommonGameParams
- 76         MagicClub
- 77         Traps
-101         PotionArtefacts
-121         Heroes
-158         HeroTalks
-215         UnitsAnimationsFiles
-216         UnitsAnimations
+ 77   MagicClub, Traps
+ 65   Units, ShopUnits
+ 26   BasicUnits, BasicUnitsAnimations
+ 30   Passives, Markers, RollingStones
+ 22   UnitMeshes, Equipment
+ 49   Missiles, AlchemyFormulaArtefacts
+ 47   SpecialArtefacts, ObjectParticles
+  6   SoundPack, UnitTalks
+  1   SoundPacksSet, CameraTracks, SpecialUpdatesLinks
 ```
+
+Two layouts exist. `WDFiles\Parameters.wd` carries the 1.0 layout (602
+lists, HEROSINGLE with 121 fields, 110 lists that do not match the sheets);
+`Update11-15.wd` and `Update16.wd` carry the 1.7 layout (HEROSINGLE with
+130 fields, exact match). The game loads the later archive, so edit the
+par from `Update16.wd`.
 
 ## Class Hierarchy (classmask.h)
 
