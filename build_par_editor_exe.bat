@@ -4,10 +4,10 @@ rem Ergebnis: %~dp0dist\TW1 PAR Editor.exe - danach auf den Desktop kopieren.
 setlocal
 pushd "%~dp0"
 "C:\Users\marco\AppData\Local\Programs\Python\Python313\python.exe" -m PyInstaller --noconfirm --onefile --windowed ^
-  --name "TW1 PAR Editor" --icon "%~dp0par_editor.ico" ^
+  --name "TW1_PAR_Editor" --icon "%~dp0par_editor.ico" ^
   --add-data "%~dp0par_editor.ico;." --add-data "%~dp0tw1_sdk_fields.json;." ^
   --add-data "%~dp0tw1_sdk_labels.json;." --add-data "%~dp0tw1_sdk_descriptions.json;." ^
-  --hidden-import theme ^
+  --hidden-import theme --hidden-import guidebook --hidden-import updater --hidden-import version --hidden-import categories ^
   --distpath "%~dp0dist" --workpath "%TEMP%\par_editor_build" --specpath "%TEMP%\par_editor_build" tw1_par_editor.py
 set rc=%errorlevel%
 popd

@@ -35,10 +35,14 @@ Or double-click `START_PAR_EDITOR.bat` on Windows.
 |------|-------------|
 | `tw1_par_editor.py` | Main editor script (GUI + parser + writer) |
 | `theme.py` | Dark theme shared by the TW1 tools |
+| `guidebook.py` | Guide window (F1): chapters, search, reference tables generated from the code |
+| `categories.py` | The groups (Player, NPCs, Enemies ...) and which SDK sheet belongs where |
+| `updater.py` + `version.py` | Update check on start and self-update from GitHub Releases |
 | `tw1_sdk_fields.json` | 39 SDK sheets with their field names, entry-to-sheet map |
 | `tw1_sdk_labels.json` + `tw1_sdk_descriptions.json` | Tooltip descriptions (joined by field name) |
 | `START_PAR_EDITOR.bat` | Windows launcher for the script version |
-| `build_par_editor_exe.bat` | PyInstaller one-file build |
+| `build_par_editor_exe.bat` | PyInstaller one-file build (`dist\TW1_PAR_Editor.exe`) |
+| `selftest_exe.bat` | Starts the built exe in selftest mode and prints its line |
 | `par_editor_settings.json` | Language, guide, original PAR path (auto-created) |
 
 Or take the exe from the Releases page — no Python needed. The script version wants all files in one folder.
@@ -165,6 +169,29 @@ These are **not separate PAR fields** — they are all part of the single `mesh`
 MIT
 
 ## Changelog
+
+### v1.5.0 (16.09.2026)
+
+- **Guide window** (Help > Guide, F1): eight chapters in English and German,
+  search, reference tables generated from the code (groups, sheets with
+  field counts, field types) with a source line under each. Gold `?` marks
+  next to the tree, the filter, the fields and the compare tab open the
+  matching chapter.
+- **Updates from GitHub:** the tool checks for a newer release on start
+  (switchable in Help) and updates itself: download, SHA-256 check against
+  the release digest, swap after the tool has closed, old exe kept as
+  `.old`. The exe is now called `TW1_PAR_Editor.exe` so the updater finds
+  it in every release.
+- **Undo / Redo** (Ctrl+Z / Ctrl+Y) for field edits, duplicate, rename,
+  delete and add. Global shortcuts let the keys through while you type.
+- **File > Restore backup** brings a copy from `_backup\` back.
+- Status bar always visible (also at small window sizes), "unsaved changes"
+  marker, one line under the header that says why a value is red, grey
+  example in the empty filter box, empty state with an Open button, the
+  language switch keeps file, selection and tab.
+- Selftest mode: `PAR_EDITOR_SELFTEST=<file>` writes one line and quits
+  (`selftest_exe.bat`).
+
 
 ### v1.4 (16.09.2026)
 

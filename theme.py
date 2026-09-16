@@ -20,9 +20,6 @@ OK = '#43b563'
 ERR = '#e06c60'
 CANVAS_BG = '#0f0d0a'
 GRID = '#1a1611'
-HI_SEL = '#ff2a2a'
-HI_MARK = '#33ff55'
-HI_MARK_2 = '#ffe14d'
 
 # Distinct, dark-theme-legible colours cycled through for NPC speakers
 # (one colour per speaker, see plan section 5.2).
@@ -32,6 +29,28 @@ PLAYER_COLOR = '#6ca0e0'
 ENTRY_COLOR = '#43b563'
 COMMENT_COLOR = '#4a453d'
 DIM = '#5c564c'
+SCROLL_THUMB = '#7a7061'     # scrollbar thumb, readable on BG
+# light blue is reserved for content from mods (update 5b): frames, dots,
+# list entries. The journal group palette below keeps away from it.
+MOD = '#56c8ff'
+MOD_DOT = '\u25cf '
+# one colour per journal group so the quest lines are told apart
+CARD_COLORS = ('#d2a044', '#6ca0e0', '#7fbf7f', '#e06c60', '#c090e0',
+               '#5fc7c7', '#e0a050', '#a0b060', '#d4796b', '#d0a0c0',
+               '#c7a86b', '#9a8fe0')
+
+
+def mix(colour, other, f):
+    """Blend two #rrggbb colours, f = share of ``colour``."""
+    a = [int(colour[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(other[i:i + 2], 16) for i in (1, 3, 5)]
+    return '#%02x%02x%02x' % tuple(int(round(x * f + y * (1 - f)))
+                                   for x, y in zip(a, b))
+
+
+def group_color(group):
+    """Colour of a journal group: every quest line gets its own."""
+    return CARD_COLORS[int(group) % len(CARD_COLORS)]
 # One colour per conversation level (state band on the node header).
 STATE_COLORS = {'first': '#d2a044', 'known': '#b08850', 'running': '#6ca0e0',
                 'taken': '#5a88c0', 'solved': '#43b563', 'closed': '#9a938a',
@@ -93,6 +112,15 @@ def apply_dark_theme(root):
                     borderwidth=1, focusthickness=1, focuscolor=LINE)
     style.map('TButton', background=[('pressed', SEL), ('active', '#282219')],
               foreground=[('disabled', '#5c564c')])
+    # the Menubutton of the timeline ("Sources"): clam paints it near white
+    # on hover, the text vanished (Marco 2026-09-16)
+    style.configure('TMenubutton', background=PANEL, foreground=INK,
+                    arrowcolor=MUT, padding=(10, 4), relief='flat',
+                    borderwidth=1)
+    style.map('TMenubutton',
+              background=[('pressed', SEL), ('active', '#282219')],
+              foreground=[('active', GOLD_HI), ('disabled', '#5c564c')],
+              arrowcolor=[('active', GOLD_HI)])
     style.configure('Accent.TButton', background=GOLD, foreground='#17130b')
     style.map('Accent.TButton',
               background=[('pressed', '#b88d3c'), ('active', GOLD_HI),
@@ -137,20 +165,20 @@ def apply_dark_theme(root):
               selectbackground=[('readonly', FIELD)],
               selectforeground=[('readonly', INK)],
               arrowcolor=[('active', GOLD)])
+    # thumb in a light warm grey on the dark trough, gold while hovered or
+    # dragged (a PANEL thumb on BG was almost invisible)
     for cls in ('Vertical.TScrollbar', 'Horizontal.TScrollbar'):
-        style.configure(cls, background=PANEL, troughcolor=BG,
-                        bordercolor=BG, arrowcolor=MUT,
-                        darkcolor=PANEL, lightcolor=PANEL,
+        style.configure(cls, background=SCROLL_THUMB, troughcolor=BG,
+                        bordercolor=LINE, arrowcolor=MUT,
+                        darkcolor=SCROLL_THUMB, lightcolor=SCROLL_THUMB,
                         gripcount=0, relief='flat', arrowsize=13)
-        style.map(cls, background=[('active', '#3a3226')],
+        style.map(cls, background=[('pressed', GOLD), ('active', GOLD_HI)],
                   arrowcolor=[('active', GOLD)])
     style.configure('TPanedwindow', background=LINE)
     style.configure('Sash', sashthickness=5, gripcount=0)
     style.configure('TProgressbar', background=GOLD, troughcolor=FIELD,
                     bordercolor=LINE, lightcolor=GOLD, darkcolor=GOLD)
     style.configure('Brand.TLabel', foreground=GOLD, font=FONT_BRAND)
-    style.configure('Link.TLabel', foreground=GOLD)
-    style.map('Link.TLabel', foreground=[('active', GOLD_HI)])
     style.configure('Panel.TFrame', background=PANEL)
     style.configure('Panel.TLabel', background=PANEL, foreground=INK)
     style.configure('PanelTitle.TLabel', background=PANEL, foreground=GOLD,
@@ -252,6 +280,41 @@ class Menu(tk.Menu):
 
     def add_cascade(self, cnf=None, **kw):
         super().add_cascade(cnf or {}, **self._soft_disable('cascade', kw))
+
+
+class FloatTip:
+    """A tooltip that follows the mouse over parts of one widget (canvas
+    items, list rows); the caller decides the text."""
+
+    def __init__(self, master):
+        self.master = master
+        self.tip = None
+        self.text = None
+
+    def show(self, text, x_root, y_root):
+        if not text:
+            self.hide()
+            return
+        if self.tip is not None and text == self.text:
+            self.tip.wm_geometry(f'+{x_root + 14}+{y_root + 14}')
+            return
+        self.hide()
+        self.text = text
+        self.tip = tk.Toplevel(self.master)
+        self.tip.wm_overrideredirect(True)
+        self.tip.attributes('-topmost', True)
+        tk.Label(self.tip, text=text, bg=PANEL, fg=INK, bd=1, relief='solid',
+                 justify='left', padx=6, pady=3, font=FONT_SMALL).pack()
+        self.tip.wm_geometry(f'+{x_root + 14}+{y_root + 14}')
+
+    def hide(self):
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+        self.tip = None
+        self.text = None
 
 
 class Tooltip:

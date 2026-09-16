@@ -129,6 +129,8 @@ Right-click a list node to add a blank entry with the same field structure as ex
 | Ctrl+S | Save PAR |
 | Ctrl+Shift+S | Save as... |
 | Ctrl+F | Focus the filter box |
+| Ctrl+Z / Ctrl+Y | Undo / Redo |
+| F1 | Guide window (chapters, search, reference tables) |
 | F3 / Enter | Next match |
 | Esc | Clear the filter |
 | Ctrl+E | Export JSON |

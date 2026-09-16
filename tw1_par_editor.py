@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""TW1 PAR Editor v1.4 — View, edit, and export Two Worlds 1 .par parameter files
+"""TW1 PAR Editor — View, edit, and export Two Worlds 1 .par parameter files
    Now with SDK field labels, duplicate/delete/rename entries"""
 
 import re
 import struct
 import os
 import sys
+import threading
 import json
 import io
 import zlib
@@ -26,9 +27,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 if HAS_TK:
     import theme                       # colours, dark titlebar, Menu (PY_TOOL_DESIGN.md)
+    import guidebook                   # Help > Guide (F1), ?-marks
+import updater                         # update check + self-update from GitHub
+from version import VERSION
+from categories import CATEGORIES, SHEET_CATEGORY, NPC_PREFIXES, category_of   # noqa: F401
 
 APP_NAME = 'TW1 PAR EDITOR'
-VERSION = '1.4'
 GITHUB_URL = 'https://github.com/MedievalDev/TW1_ParEditor'
 SITE_URL = 'https://alchemy-fox.de/'
 GUIDE_URL = 'https://alchemy-fox.de/game/TW1_ParEditor/'
@@ -819,50 +823,35 @@ class FieldDescriptions:
         return self.descs.get(label) if label else None
 
 
-# ------------------------------------------------------------- Kategorien --
-# The 609 lists of the par grouped into a dozen categories a modder thinks
-# in. Sheet -> category; the Units sheet is split by the name of the list's
-# first entry (NPC-ish prefixes vs. everything else = enemies).
-
-CATEGORIES = [
-    'Player', 'NPCs', 'Enemies', 'Animals & Mounts', 'Weapons & Missiles',
-    'Armour & Equipment', 'Magic & Effects', 'Potions & Items',
-    'Objects & Buildings', 'Traps', 'Sounds & Voices', 'Meshes & Animations',
-    'Game Parameters', 'Other',
-]
-SHEET_CATEGORY = {
-    'Heroes': 'Player', 'HeroTalks': 'Player',
-    'ShopUnits': 'NPCs', 'UnitTalks': 'NPCs',
-    'BasicUnits': 'Animals & Mounts',
-    'Weapon': 'Weapons & Missiles', 'MagicClub': 'Weapons & Missiles',
-    'Missiles': 'Weapons & Missiles', 'PierceMissileSlots': 'Weapons & Missiles',
-    'Equipment': 'Armour & Equipment', 'EquipmentArtefacts': 'Armour & Equipment',
-    'MagicCard': 'Magic & Effects', 'Dynamics': 'Magic & Effects',
-    'PotionArtefacts': 'Potions & Items', 'AlchemyFormulaArtefacts': 'Potions & Items',
-    'SpecialArtefacts': 'Potions & Items', 'CustomArtefacts': 'Potions & Items',
-    'Passives': 'Objects & Buildings', 'SimplePassives': 'Objects & Buildings',
-    'Containers': 'Objects & Buildings', 'Gates': 'Objects & Buildings',
-    'Teleports': 'Objects & Buildings', 'Markers': 'Objects & Buildings',
-    'Traps': 'Traps',
-    'SoundPack': 'Sounds & Voices', 'SoundPacksSet': 'Sounds & Voices',
-    'UnitMeshes': 'Meshes & Animations', 'BasicUnitsAnimations': 'Meshes & Animations',
-    'UnitsAnimations': 'Meshes & Animations', 'UnitsAnimationsFiles': 'Meshes & Animations',
-    'CustomScalers': 'Meshes & Animations', 'MeshButtonViewParams': 'Meshes & Animations',
-    'CameraTracks': 'Meshes & Animations',
-    'CommonGameParams': 'Game Parameters', 'ObjectParticles': 'Game Parameters',
-    'InventoryDialogParams': 'Game Parameters', 'SpecialUpdatesLinks': 'Game Parameters',
-}
-# Units lists whose first entry starts like this are people you talk to.
-NPC_PREFIXES = ('CITIZEN', 'BARTENDER', 'CHAR_', 'KARGA', 'GIRIZA', 'SKELDEN',
-                'SOLDIER', 'WARRIOR', 'MASTER_', 'SOUL_', 'SISTER', 'NPC_',
-                'THE_1_COACH', 'SHOP', 'TRADER', 'GUARD', 'PRIEST', 'MERCHANT')
+def help_mark(parent, text, chapter, app, panel=False):
+    """Small gold "?" next to a panel title or field: hover explains, click
+    opens the guide at the chapter (PY_TOOL_DESIGN.md 6.3)."""
+    lbl = ttk.Label(parent, text='?', style='Panel.TLabel' if panel else 'TLabel',
+                    foreground=theme.GOLD, cursor='hand2')
+    lbl.pack(side='left', padx=(6, 0))
+    theme.Tooltip(lbl, text)
+    lbl.bind('<Button-1>', lambda ev: app.show_help(text, chapter))
+    return lbl
 
 
-def category_of(sheet, first_name):
-    if sheet == 'Units':
-        up = (first_name or '').upper()
-        return 'NPCs' if up.startswith(NPC_PREFIXES) else 'Enemies'
-    return SHEET_CATEGORY.get(sheet, 'Other')
+def placeholder(widget, var, text):
+    """Grey example inside an empty entry; gone as soon as something is typed."""
+    def show():
+        if not var.get():
+            widget.configure(foreground=theme.DIM)
+            var.set(text)
+            widget._placeholder = True
+
+    def clear(_ev=None):
+        if getattr(widget, '_placeholder', False):
+            var.set('')
+            widget.configure(foreground=theme.INK)
+            widget._placeholder = False
+
+    widget.bind('<FocusIn>', clear, add='+')
+    widget.bind('<FocusOut>', lambda ev: show(), add='+')
+    show()
+    return widget
 
 
 class ToolTip:
@@ -1086,15 +1075,18 @@ class Guide:
 
 
 class ParEditorApp:
-    def __init__(self, root):
+    def __init__(self, root, carry=None):
         self.root = root
         self.cfg = Config()
+        self._carry = carry or {}      # state handed over by the DE/EN rebuild
+        self.selftest = os.environ.get('PAR_EDITOR_SELFTEST')
+        self.undo_stack, self.redo_stack = [], []
         global _LANG
         _LANG = self.cfg.get('lang') or ('de' if system_is_german() else 'en')
         self.restart = False          # set by the DE/EN toggle; main() rebuilds
         self.guide = Guide(self)
         self.root.withdraw()
-        self.root.title("TW1 PAR Editor v1.4")
+        self.root.title(f"TW1 PAR Editor v{VERSION}")
         self.root.geometry("1200x750")
         self.root.minsize(900, 550)
         self._icon()
@@ -1120,12 +1112,221 @@ class ParEditorApp:
         self._filter_job = None       # debounce timer of the live filter
         self._invalid = {}            # field_idx -> label of fields with bad input
 
+        self.update_var = tk.BooleanVar(value=bool(self.cfg.get('update_check', True)))
         self._setup_theme()
         self._build_ui()
         self._bind_keys()
+        if self._carry.get('geometry'):
+            self.root.geometry(self._carry['geometry'])
         self.root.deiconify()
-        if not self.cfg.get('guide_seen'):
-            self.root.after(900, self.guide.start)
+        self.root.after(200, self._startup)
+
+    # ── Start-up: carried state, update check, selftest ──
+
+    def _startup(self):
+        updater.cleanup_old()
+        c = self._carry
+        if c.get('path') and os.path.isfile(c['path']):
+            self._load_par(c['path'])
+            if c.get('select') and self.par:
+                li, ei = c['select']
+                iid = f"L{li}E{ei}"
+                if self.tree.exists(iid):
+                    self._open_list(f"L{li}")
+                    self.tree.selection_set(iid)
+                    self.tree.see(iid)
+                    self._show_entry(li, ei)
+            if c.get('tab'):
+                self.notebook.select(c['tab'])
+        if self.selftest:
+            self._run_selftest()
+            return
+        if not c and self.cfg.get('update_check', True):
+            self.root.after(1500, self.check_updates)
+        if not c and not self.cfg.get('guide_seen'):
+            self.root.after(700, self.guide.start)
+
+    def _run_selftest(self):
+        """PAR_EDITOR_SELFTEST=<file>: write the core facts and quit."""
+        try:
+            https = 'ok'
+            try:
+                import http.client  # noqa: F401
+                import ssl  # noqa: F401
+                import urllib.request  # noqa: F401
+            except ImportError as e:
+                https = f'missing:{e.name}'
+            with open(self.selftest, 'w', encoding='utf-8') as f:
+                f.write(f'version={VERSION} sheets={len(self.field_labels.sheets)} '
+                        f'names={self.field_labels.total} descs={len(self.field_descs.descs)} '
+                        f'chapters={len(guidebook.CHAPTERS)} https={https} '
+                        f'frozen={getattr(sys, "frozen", False)}\n')
+        except Exception as e:
+            with open(self.selftest, 'a', encoding='utf-8') as f:
+                f.write(f'selftest failed: {e!r}\n')
+        finally:
+            self.root.after(50, self.root.destroy)
+
+    def _toggle_update_check(self):
+        self.cfg['update_check'] = bool(self.update_var.get())
+        self.cfg.save()
+
+    def check_updates(self, manual=False):
+        """Ask GitHub for the latest release (thread) and tell the user when
+        it is newer. On start silently, from the menu with an answer."""
+        results = []
+        updater.check_async(lambda info, err: results.append((info, err)))
+
+        def poll():
+            try:
+                if not self.root.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            if not results:
+                self.root.after(200, poll)
+                return
+            info, err = results[0]
+            if err is not None or info is None:
+                if manual:
+                    messagebox.showwarning(tr("Update"), tr("GitHub was not reachable: {err}").format(err=err),
+                                           parent=self.root)
+                return
+            if not updater.is_newer(info['tag']):
+                if manual:
+                    messagebox.showinfo(tr("Update"), tr("You have the latest version ({version}).").format(version=VERSION),
+                                        parent=self.root)
+                return
+            if not manual and self.cfg.get('update_skip') == info['tag']:
+                return
+            self.set_hint(tr("Update available: version {version}").format(version=info['version']))
+            UpdateWindow(self, info)
+        self.root.after(200, poll)
+
+    def _confirm_discard(self):
+        """True when unsaved changes may be dropped (asks to save first)."""
+        if not self.modified:
+            return True
+        r = messagebox.askyesnocancel(tr("Unsaved Changes"), tr("Save changes first?"), parent=self.root)
+        if r is None:
+            return False
+        if r:
+            self._save()
+            return not self.modified
+        return True
+
+    # ── Guide window and ?-marks ──
+
+    def show_guide(self, chapter='start'):
+        guidebook.GuideWindow.show(self, chapter)
+
+    def show_help(self, text, chapter):
+        self.set_hint(text.split('\n')[0])
+        self.show_guide(chapter)
+
+    def set_hint(self, text):
+        self.hint_label.configure(text=(text or '')[:140])
+
+    # ── Undo / Redo (snapshot per change, PY_TOOL_DESIGN.md 7.2) ──
+
+    def _snapshot(self, scope):
+        kind = scope[0]
+        if kind == 'entry':
+            e = self.par.lists[scope[1]].entries[scope[2]]
+            return (e.name, [copy.deepcopy(f.value) for f in e.fields])
+        if kind == 'list':
+            pl = self.par.lists[scope[1]]
+            return (list(pl.entries), [(e.name, [copy.deepcopy(f.value) for f in e.fields]) for e in pl.entries])
+        return [(list(pl.entries), [(e.name, [copy.deepcopy(f.value) for f in e.fields]) for e in pl.entries])
+                for pl in self.par.lists]
+
+    def _restore(self, scope, state):
+        kind = scope[0]
+        if kind == 'entry':
+            e = self.par.lists[scope[1]].entries[scope[2]]
+            e.name, vals = state
+            for f, v in zip(e.fields, vals):
+                f.value = v
+        elif kind == 'list':
+            pl = self.par.lists[scope[1]]
+            pl.entries[:] = state[0]
+            for e, (name, vals) in zip(pl.entries, state[1]):
+                e.name = name
+                for f, v in zip(e.fields, vals):
+                    f.value = v
+        else:
+            for pl, (ents, vals) in zip(self.par.lists, state):
+                pl.entries[:] = ents
+                for e, (name, fv) in zip(pl.entries, vals):
+                    e.name = name
+                    for f, v in zip(e.fields, fv):
+                        f.value = v
+
+    def push_undo(self, scope, label):
+        if not self.par:
+            return
+        self.undo_stack.append((label, scope, self._snapshot(scope)))
+        del self.undo_stack[:-50]
+        self.redo_stack.clear()
+
+    def _apply_undo(self, take_from, put_to, word):
+        if not take_from or not self.par:
+            self.set_hint(tr("Nothing to {word}").format(word=word))
+            return
+        label, scope, state = take_from.pop()
+        put_to.append((label, scope, self._snapshot(scope)))
+        self._restore(scope, state)
+        self.modified = True
+        self._update_title()
+        keep = (self.current_li, self.current_ei) if self.current_entry else None
+        self._populate_tree(keep_selection=keep)
+        if keep and self.tree.exists(f"L{keep[0]}E{keep[1]}"):
+            self._show_entry(*keep)
+        self._set_status(f"{word.capitalize()}: {label}")
+
+    def do_undo(self):
+        self._apply_current_edits()
+        self._apply_undo(self.undo_stack, self.redo_stack, tr("undo"))
+
+    def do_redo(self):
+        self._apply_current_edits()
+        self._apply_undo(self.redo_stack, self.undo_stack, tr("redo"))
+
+    def _typing(self):
+        w = self.root.focus_get()
+        return isinstance(w, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox, ttk.Spinbox, tk.Listbox))
+
+    def _key(self, fn):
+        """Global shortcut that lets the key through while typing in a field."""
+        def handler(ev):
+            if self._typing():
+                return None
+            fn()
+            return 'break'
+        return handler
+
+    def _restore_backup(self):
+        """File > Restore backup: pick a copy from _backup and load it as the
+        current file (saving then writes it back over the original)."""
+        if not self.filepath:
+            messagebox.showinfo(tr("Restore backup"), tr("Open a .par first - backups sit next to it."), parent=self.root)
+            return
+        bdir = os.path.join(os.path.dirname(self.filepath), '_backup')
+        if not os.path.isdir(bdir):
+            messagebox.showinfo(tr("Restore backup"), tr("No _backup folder next to this file yet."), parent=self.root)
+            return
+        p = filedialog.askopenfilename(title=tr("Restore backup"), initialdir=bdir,
+                                       filetypes=[("PAR backups", "*.par"), ("All Files", "*.*")])
+        if not p or not self._confirm_discard():
+            return
+        target = self.filepath
+        self._load_par(p)
+        self.filepath = target
+        self.par.filepath = target
+        self.modified = True
+        self._update_title()
+        self._set_status(tr("Loaded {b} - Save (Ctrl+S) writes it back to {f}").format(
+            b=os.path.basename(p), f=os.path.basename(target)))
 
     def _icon(self):
         base = getattr(sys, '_MEIPASS', HERE)
@@ -1175,13 +1376,16 @@ class ParEditorApp:
         global _LANG
         if code == _LANG:
             return
-        if self.modified and not messagebox.askyesno(
-                tr("Unsaved Changes"), tr("Switching the language rebuilds the window. Discard unsaved changes?")):
+        if not self._confirm_discard():
             return
         self.cfg['lang'] = code
         self.cfg.save()
         _LANG = code
         self.restart = True
+        self.carry_out = {'path': self.filepath if self.filepath and os.path.isfile(self.filepath) else None,
+                          'select': (self.current_li, self.current_ei) if self.current_entry else None,
+                          'tab': self.notebook.index(self.notebook.select()) if hasattr(self, 'notebook') else 0,
+                          'geometry': self.root.geometry()}
         self.root.destroy()
 
     def _popup(self, filler, widget):
@@ -1204,11 +1408,19 @@ class ParEditorApp:
         m.add_command(label=tr("Export JSON..."), accelerator="Ctrl+E", command=self._export_json,
                       state='normal' if self.par else 'disabled')
         m.add_separator()
+        m.add_command(label=tr("Restore backup..."), command=self._restore_backup,
+                      state='normal' if self.par else 'disabled')
+        m.add_separator()
         m.add_command(label=tr("Exit"), accelerator="Alt+F4", command=self._on_close)
 
     def _fill_edit(self, m):
         has = bool(self.par and self.current_entry)
         li, ei = self.current_li, self.current_ei
+        m.add_command(label=tr("Undo"), accelerator="Ctrl+Z", command=self.do_undo,
+                      state='normal' if self.undo_stack else 'disabled')
+        m.add_command(label=tr("Redo"), accelerator="Ctrl+Y", command=self.do_redo,
+                      state='normal' if self.redo_stack else 'disabled')
+        m.add_separator()
         m.add_command(label=tr("Duplicate entry..."), command=lambda: self._duplicate_entry(li, ei),
                       state='normal' if has else 'disabled')
         m.add_command(label=tr("Rename entry..."), command=lambda: self._rename_entry(li, ei),
@@ -1238,11 +1450,17 @@ class ParEditorApp:
         m.add_command(label=tr("Set Original PAR..."), command=self._cmp_set_original)
 
     def _fill_help(self, m):
-        m.add_command(label=tr("Start guide"), command=self.guide.start)
+        m.add_command(label=tr("Guide"), accelerator="F1", command=self.show_guide)
+        m.add_command(label=tr("Start tour"), command=self.guide.start)
         m.add_command(label=tr("Documentation"), command=lambda: webbrowser.open(GUIDE_URL))
         m.add_separator()
         for name, url in LINKS:
             m.add_command(label=f'{name}  ({url})', command=lambda u=url: webbrowser.open(u))
+        m.add_separator()
+        m.add_command(label=tr("Check for updates"), command=lambda: self.check_updates(manual=True))
+        m.add_checkbutton(label=tr("Check for updates on start"), variable=self.update_var,
+                          command=self._toggle_update_check)
+        m.add_command(label=tr("Latest version on GitHub"), command=lambda: webbrowser.open(updater.LATEST_PAGE))
         m.add_separator()
         m.add_command(label=tr("About"), command=self.show_about)
 
@@ -1296,6 +1514,17 @@ class ParEditorApp:
     def _build_ui(self):
         self._build_menubar()
 
+        # ── Status bar: packed before the panes so it never gets squeezed
+        # out at small window sizes (PY_TOOL_DESIGN.md 7.5) ──
+        self.statusbar = ttk.Frame(self.root, style='Status.TFrame')
+        self.statusbar.pack(fill='x', side='bottom')
+        self.status = ttk.Label(self.statusbar, text="Ready", style='Status.TLabel')
+        self.status.pack(side='left')
+        self.hint_label = ttk.Label(self.statusbar, text="", style='Status.TLabel')
+        self.hint_label.pack(side='right')
+        self.dirty_label = ttk.Label(self.statusbar, text="", style='StatusErr.TLabel')
+        self.dirty_label.pack(side='right')
+
         # ── Toolbar ──
         toolbar = ttk.Frame(self.root, padding=(8, 6))
         toolbar.pack(fill='x')
@@ -1316,6 +1545,7 @@ class ParEditorApp:
                                     width=20, values=[tr('All')] + [tr(c) for c in CATEGORIES])
         self.cat_box.pack(side='left', padx=(0, 12))
         self.cat_box.bind('<<ComboboxSelected>>', lambda e: self._apply_filter())
+        help_mark(toolbar, tr("One group of the par: player, NPCs, enemies, weapons ... The tree is grouped the same way. Click for the guide."), 'groups', self)
         ToolTip(self.cat_box, tr("Show only one group: player, NPCs, enemies, weapons, "
                                  "game parameters ... The tree is grouped the same way."))
 
@@ -1332,6 +1562,8 @@ class ParEditorApp:
                    style='Small.TButton', width=3).pack(side='left', padx=(0, 2))
         self.search_label = ttk.Label(toolbar, text="", style='Dim.TLabel')
         self.search_label.pack(side='left', padx=(4, 0))
+        help_mark(toolbar, tr("Type to keep only matching entries: name, sheet or text field. Several words must all match. Click for the guide."), 'filter', self)
+        placeholder(self.search_entry, self.search_var, tr("wolf, traps, units wolf ..."))
         ToolTip(self.search_entry, tr(
                 "Type to filter the tree: entry name, sheet (Units, Weapon, Traps ...)\n"
                 "or any text field such as the mesh path. Several words: all must match.\n"
@@ -1358,12 +1590,23 @@ class ParEditorApp:
         left_frame = ttk.Frame(paned)
         paned.add(left_frame, width=420, minsize=250)
 
-        tree_label = ttk.Label(left_frame, text="  " + tr("Lists & Entries"),
+        hdr = ttk.Frame(left_frame)
+        hdr.pack(fill='x', pady=(0, 2))
+        tree_label = ttk.Label(hdr, text="  " + tr("Lists & Entries"),
                                 style='TLabel', font=('Segoe UI', 10, 'bold'))
-        tree_label.pack(fill='x', pady=(0, 2))
+        tree_label.pack(side='left')
+        help_mark(hdr, tr("Groups, below them the SDK sheets, below those the entries. Right-click an entry to duplicate, rename or delete it."), 'tree', self)
 
         tree_container = ttk.Frame(left_frame)
         tree_container.pack(fill='both', expand=True)
+        # Empty state: never a blank pane without a way forward (7.4)
+        self.empty_box = ttk.Frame(tree_container, style='Panel.TFrame', padding=16)
+        ttk.Label(self.empty_box, text=tr("No file loaded"), style='PanelTitle.TLabel').pack()
+        ttk.Label(self.empty_box, text=tr("Open the TwoWorlds.par from WDFiles\\Update16.wd - the one the game runs."),
+                  style='PanelMuted.TLabel', wraplength=260, justify='center').pack(pady=(0, 10))
+        ttk.Button(self.empty_box, text=tr("Open PAR...") + "  (Ctrl+O)", style='Accent.TButton',
+                   command=self._open_par).pack()
+        self.empty_box.place(relx=0.5, rely=0.38, anchor='center')
 
         self.tree = ttk.Treeview(tree_container, show='tree',
                                   selectmode='browse')
@@ -1380,13 +1623,17 @@ class ParEditorApp:
         right_frame = ttk.Frame(paned)
         paned.add(right_frame, minsize=400)
 
-        self.detail_header = ttk.Label(right_frame,
-                                        text=tr("Select an entry to view details"),
+        dh = ttk.Frame(right_frame)
+        dh.pack(fill='x', padx=8, pady=(4, 2))
+        self.detail_header = ttk.Label(dh, text=tr("Select an entry to view details"),
                                         style='Title.TLabel')
-        self.detail_header.pack(fill='x', padx=8, pady=(4, 2))
+        self.detail_header.pack(side='left')
+        help_mark(dh, tr("Every field with its SDK name; hover a name for the description. Red border = not a valid value, the old one is kept."), 'fields', self)
 
         self.detail_info = ttk.Label(right_frame, text="", style='Info.TLabel')
-        self.detail_info.pack(fill='x', padx=8, pady=(0, 4))
+        self.detail_info.pack(fill='x', padx=8, pady=(0, 2))
+        self.field_error = ttk.Label(right_frame, text="", style='StatusErr.TLabel')
+        self.field_error.pack(fill='x', padx=8, pady=(0, 2))
 
         # Scrollable detail area
         detail_container = ttk.Frame(right_frame)
@@ -1414,9 +1661,6 @@ class ParEditorApp:
         # Tab 2: Compare & Merge
         self._build_compare_tab()
 
-        # ── Status Bar ──
-        self.status = ttk.Label(self.root, text="Ready", style='Status.TLabel')
-
         # Show label info
         total_labels = self.field_labels.total
         total_descs = len(self.field_descs.descs)
@@ -1428,7 +1672,6 @@ class ParEditorApp:
         else:
             self.status.configure(
                 text="Ready — tw1_sdk_fields.json not found next to the editor: no field names")
-        self.status.pack(fill='x', side='bottom')
 
     def _bind_keys(self):
         self.root.bind('<Control-o>', lambda e: self._open_par())
@@ -1439,6 +1682,9 @@ class ParEditorApp:
         self.root.bind('<Control-f>', lambda e: (self.search_entry.focus_set(),
                                                  self.search_entry.select_range(0, 'end')))
         self.root.bind('<F3>', lambda e: self._search_next())
+        self.root.bind('<F1>', lambda e: self.show_guide())
+        self.root.bind('<Control-z>', self._key(self.do_undo))
+        self.root.bind('<Control-y>', self._key(self.do_redo))
         self.root.bind('<Return>', lambda e: self._search_next()
                        if self.search_entry == self.root.focus_get() else None)
         self.root.bind('<Escape>', lambda e: self.search_var.set('')
@@ -1490,7 +1736,10 @@ class ParEditorApp:
             self.filepath = path
             self.modified = False
             self._backed_up = set()
+            self.undo_stack.clear()
+            self.redo_stack.clear()
             self.field_labels.resolve(self.par)
+            self.empty_box.place_forget()
             self._populate_tree()
             self._update_title()
 
@@ -1530,7 +1779,10 @@ class ParEditorApp:
             self.par.filepath = self.filepath
             self.modified = True
             self._backed_up = set()
+            self.undo_stack.clear()
+            self.redo_stack.clear()
             self.field_labels.resolve(self.par)
+            self.empty_box.place_forget()
             self._populate_tree()
             self._update_title()
 
@@ -1645,7 +1897,8 @@ class ParEditorApp:
     def _update_title(self):
         name = Path(self.filepath).name if self.filepath else "Untitled"
         mod = " *" if self.modified else ""
-        self.root.title(f"TW1 PAR Editor v1.4 — {name}{mod}")
+        self.dirty_label.configure(text=tr("unsaved changes") + "  " if self.modified else "")
+        self.root.title(f"TW1 PAR Editor v{VERSION} — {name}{mod}")
 
     def _set_status(self, msg):
         self.status.configure(text=msg)
@@ -1683,7 +1936,7 @@ class ParEditorApp:
         if not self.par:
             return
 
-        terms = [t for t in self.search_var.get().strip().lower().split() if t]
+        terms = [t for t in self._filter_text().lower().split() if t]
         self.search_results = []
         self.search_idx = 0
         self._last_query = ' '.join(terms)
@@ -1931,7 +2184,7 @@ class ParEditorApp:
                              highlightcolor=self.ACCENT,
                              highlightbackground=self.BG3)
                 w.pack(side='left', fill='x', expand=True, ipady=2)
-                self._watch_input(var, w, field.dtype)
+                self._watch_input(var, w, field.dtype, label_name or f"[{fi}]")
                 self.edit_widgets.append((fi, field.dtype, var))
 
             elif field.dtype == TYPE_FLOAT32:
@@ -1943,7 +2196,7 @@ class ParEditorApp:
                              highlightcolor=self.ACCENT,
                              highlightbackground=self.BG3)
                 w.pack(side='left', fill='x', expand=True, ipady=2)
-                self._watch_input(var, w, field.dtype)
+                self._watch_input(var, w, field.dtype, label_name or f"[{fi}]")
                 self.edit_widgets.append((fi, field.dtype, var))
 
             elif field.dtype == TYPE_STRING:
@@ -2007,13 +2260,20 @@ class ParEditorApp:
         except (ValueError, TypeError):
             return False
 
-    def _watch_input(self, var, widget, dtype):
-        """Red border while the text is not a valid value for the field."""
+    def _watch_input(self, var, widget, dtype, label=''):
+        """Red border while the text is not a valid value for the field, and
+        one line under the header that says why (7.1: instant check)."""
         def check(*_):
             ok = self._value_ok(var.get(), dtype)
             widget.configure(highlightbackground=self.BG3 if ok else self.RED,
                              highlightcolor=self.ACCENT if ok else self.RED,
                              highlightthickness=1 if ok else 2)
+            if ok:
+                if self.field_error.cget('text').startswith(label + ':'):
+                    self.field_error.configure(text='')
+            else:
+                why = tr("not a whole number (0x.. is fine)") if dtype in (TYPE_INT32, TYPE_UINT32) else tr("not a number")
+                self.field_error.configure(text=f"{label}: {why}")
         var.trace_add('write', check)
 
     def _label_context(self, event, sheet, field_idx):
@@ -2174,6 +2434,7 @@ class ParEditorApp:
                     nf.value = nf.value[:idx] + new_name + nf.value[idx + len(old_lower):]
 
         # Insert after original
+        self.push_undo(('list', li), tr("duplicate {name}").format(name=src.name))
         pl.entries.insert(ei + 1, new_entry)
 
         self.modified = True
@@ -2206,6 +2467,7 @@ class ParEditorApp:
             return
         new_name = new_name.strip()
 
+        self.push_undo(('entry', li, ei), tr("rename {name}").format(name=old_name))
         entry.name = new_name
 
         # Optionally update string fields referencing old name
@@ -2246,6 +2508,7 @@ class ParEditorApp:
             f"Delete '{name}' from List {li}?\n\nThis cannot be undone."):
             return
 
+        self.push_undo(('list', li), tr("delete {name}").format(name=name))
         pl.entries.pop(ei)
         self.modified = True
         self._update_title()
@@ -2291,6 +2554,7 @@ class ParEditorApp:
                     nf.value = []
                 new_entry.fields.append(nf)
 
+        self.push_undo(('list', li), tr("add {name}").format(name=new_name))
         pl.entries.append(new_entry)
 
         self.modified = True
@@ -2321,8 +2585,9 @@ class ParEditorApp:
         """Clear the detail panel."""
         for w in self.detail_inner.winfo_children():
             w.destroy()
-        self.detail_header.configure(text="Select an entry")
+        self.detail_header.configure(text=tr("Select an entry"))
         self.detail_info.configure(text="")
+        self.field_error.configure(text="")
         self.edit_widgets = []
         self.current_entry = None
 
@@ -2333,6 +2598,7 @@ class ParEditorApp:
 
         entry = self.current_entry
         changed = False
+        before = self._snapshot(('entry', self.current_li, self.current_ei))
 
         self._invalid = {}
         for fi, dtype, widget in self.edit_widgets:
@@ -2394,16 +2660,26 @@ class ParEditorApp:
                 self._invalid[fi] = self.field_labels.get(sheet, fi) or f"[{fi}]"
 
         if self._invalid:
-            self._set_status("Invalid value kept OLD value: " + ', '.join(self._invalid.values()))
+            self._set_status(tr("Invalid value kept OLD value: ") + ', '.join(self._invalid.values()))
         if changed:
+            self.undo_stack.append((tr("edit {name}").format(name=entry.name),
+                                    ('entry', self.current_li, self.current_ei), before))
+            del self.undo_stack[:-50]
+            self.redo_stack.clear()
             self.modified = True
             self._update_title()
 
     # ── Search ──
 
+    def _filter_text(self):
+        """Filter box content, '' while it shows the grey example."""
+        if getattr(self.search_entry, '_placeholder', False):
+            return ''
+        return self.search_var.get().strip()
+
     def _search_next(self):
         """Jump to the next entry of the filtered tree."""
-        query = ' '.join(self.search_var.get().strip().lower().split())
+        query = ' '.join(self._filter_text().lower().split())
         if not query or not self.par:
             self.search_label.configure(text="")
             return
@@ -2461,6 +2737,7 @@ class ParEditorApp:
         sf.pack(fill='x', pady=(0, 4))
         tk.Label(sf, text="Source PAR:", bg=self.BG3, fg=self.GREEN,
                  font=('Segoe UI', 10, 'bold'), width=14, anchor='w').pack(side='left')
+        help_mark(sf, tr("Source: your file. Input: the file with the changes to take over. Original: the untouched retail par as reference. Compare, tick rows, Merge."), 'compare', self, panel=True)
         ttk.Button(sf, text="Load...", command=self._cmp_load_source,
                    style='Small.TButton').pack(side='left', padx=(0, 8))
         self.cmp_source_label = tk.Label(sf, text="(none)", bg=self.BG3,
@@ -3125,17 +3402,121 @@ def cli_export(par_path, json_path):
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+class UpdateWindow:
+    """A newer release exists: notes, update now, later, skip (design 9)."""
+
+    def __init__(self, app, info):
+        self.app = app
+        self.info = info
+        self.win = tk.Toplevel(app.root)
+        self.win.title(tr("Update"))
+        self.win.transient(app.root)
+        self.win.geometry('620x480')
+        theme.dark_titlebar(self.win)
+        self.win.bind('<Escape>', lambda e: self.win.destroy())
+        f = ttk.Frame(self.win, padding=16)
+        f.pack(fill='both', expand=True)
+        ttk.Label(f, text=tr("Version {version} is out").format(version=info['version']),
+                  style='Brand.TLabel').pack(anchor='w')
+        ttk.Label(f, text=tr("You have {current}. The update downloads the exe from GitHub, checks its SHA-256 checksum, closes the tool and starts version {version}. The old exe stays as .old until the next start.").format(current=VERSION, version=info['version']),
+                  style='Muted.TLabel', wraplength=580, justify='left').pack(anchor='w', pady=(2, 8))
+        txt = tk.Text(f, wrap='word', font=theme.FONT, height=12)
+        txt.pack(fill='both', expand=True)
+        txt.insert('1.0', info['notes'].split('\n---')[0].strip() or info['page'])
+        txt.configure(state='disabled')
+        self.status = ttk.Label(f, text='', style='Muted.TLabel', wraplength=580, justify='left')
+        self.status.pack(anchor='w', pady=(8, 0))
+        self.bar = ttk.Progressbar(f, maximum=100)
+        btns = ttk.Frame(f)
+        btns.pack(fill='x', side='bottom', pady=(10, 0))
+        ttk.Button(btns, text=tr("Later"), command=self.win.destroy).pack(side='right')
+        ttk.Button(btns, text=tr("Skip this version"), command=self.skip).pack(side='right', padx=6)
+        self.exe = updater.frozen_exe()
+        self.go = ttk.Button(btns, text=tr("Update now") if self.exe else tr("Open release page"),
+                             style='Accent.TButton', command=self.start)
+        self.go.pack(side='right')
+        ttk.Button(btns, text=tr("View on GitHub"), command=lambda: webbrowser.open(info['page'])).pack(side='left')
+        if self.exe and not info.get('sha256'):
+            self.status.configure(text=tr("This release has no checksum. Without one the tool installs nothing; Update now opens the release page."))
+
+    def skip(self):
+        self.app.cfg['update_skip'] = self.info['tag']
+        self.app.cfg.save()
+        self.win.destroy()
+
+    def start(self):
+        if not self.exe or not self.info.get('sha256') or not self.info.get('url'):
+            webbrowser.open(self.info['page'])
+            if not self.exe:
+                self.win.destroy()
+            return
+        if not self.app._confirm_discard():
+            return
+        self.go.state(['disabled'])
+        self.bar.pack(fill='x', pady=(6, 0), before=self.status)
+        self.status.configure(text=tr("Downloading ..."))
+        new = self.exe + '.new'
+        state = {}
+
+        def progress(done, total):
+            state['p'] = (done, total)
+
+        def work():
+            try:
+                updater.download(self.info, new, progress)
+                state['ok'] = True
+            except Exception as e:       # shown in the window
+                state['err'] = e
+        threading.Thread(target=work, daemon=True).start()
+
+        def poll():
+            try:
+                if not self.win.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            done, total = state.get('p', (0, 0))
+            if total:
+                self.bar.configure(value=100 * done / total)
+                self.status.configure(text=tr("Downloading {done} of {total} MB ...").format(
+                    done=done // 1048576, total=max(1, total // 1048576)))
+            if 'err' in state:
+                self.go.state(['!disabled'])
+                self.status.configure(text=tr("Update failed, nothing was changed: {err}").format(err=state['err']))
+                return
+            if not state.get('ok'):
+                self.win.after(150, poll)
+                return
+            self.status.configure(text=tr("Checksum matches. The tool closes and starts the new version."))
+            try:
+                updater.start_swap(self.exe, new)
+            except OSError as e:
+                self.status.configure(text=tr("Update failed, nothing was changed: {err}").format(err=e))
+                self.go.state(['!disabled'])
+                return
+            self.win.after(600, self._close_app)
+        poll()
+
+    def _close_app(self):
+        app = self.app
+        try:
+            app.cfg['window'] = app.root.geometry()
+            app.cfg.save()
+        finally:
+            app.root.destroy()
+
+
 def run_gui(path=None):
-    """Window loop; the DE/EN toggle destroys and rebuilds the window."""
+    """Window loop; the DE/EN toggle destroys and rebuilds the window and
+    hands the open file, selection, tab and geometry over."""
+    carry = {'path': path} if path else None
     while True:
         root = tk.Tk()
-        app = ParEditorApp(root)
-        if path:
-            app._load_par(path)
+        app = ParEditorApp(root, carry)
         root.mainloop()
         if not app.restart:
             break
-        path = app.filepath or None
+        carry = getattr(app, 'carry_out', None) or {}
 
 # ------------------------------------------------------------------ Deutsch --
 
@@ -3148,6 +3529,44 @@ DE = {
     'Game Parameters': 'Spielparameter', 'Other': 'Sonstiges', '{n} entries': '{n} Eintraege',
     'Show only one group: player, NPCs, enemies, weapons, game parameters ... The tree is grouped the same way.':
         'Nur eine Gruppe zeigen: Spieler, NPCs, Gegner, Waffen, Spielparameter ... Der Baum ist genauso gruppiert.',
+    'Guide': 'Guide', 'Start tour': 'Rundgang starten', 'Check for updates': 'Nach Updates suchen',
+    'Check for updates on start': 'Beim Start nach Updates suchen', 'Latest version on GitHub': 'Neueste Version auf GitHub',
+    'Restore backup...': 'Sicherung wiederherstellen...', 'Restore backup': 'Sicherung wiederherstellen',
+    'Open a .par first - backups sit next to it.': 'Erst eine .par oeffnen - die Sicherungen liegen daneben.',
+    'No _backup folder next to this file yet.': 'Neben dieser Datei gibt es noch keinen Ordner _backup.',
+    'Loaded {b} - Save (Ctrl+S) writes it back to {f}': '{b} geladen - Speichern (Strg+S) schreibt sie zurueck nach {f}',
+    'Undo': 'Rueckgaengig', 'Redo': 'Wiederholen', 'undo': 'rueckgaengig', 'redo': 'wiederholen',
+    'Nothing to {word}': 'Nichts zum {word}', 'edit {name}': '{name} bearbeiten', 'duplicate {name}': '{name} duplizieren',
+    'rename {name}': '{name} umbenennen', 'delete {name}': '{name} loeschen', 'add {name}': '{name} anlegen',
+    'Save changes first?': 'Aenderungen vorher speichern?', 'unsaved changes': 'ungespeichert',
+    'Select an entry': 'Eintrag waehlen', 'Invalid value kept OLD value: ': 'Ungueltiger Wert, ALTER Wert bleibt: ',
+    'not a whole number (0x.. is fine)': 'keine ganze Zahl (0x.. geht auch)', 'not a number': 'keine Zahl',
+    'wolf, traps, units wolf ...': 'wolf, traps, units wolf ...',
+    'Open the TwoWorlds.par from WDFiles\\Update16.wd - the one the game runs.':
+        'Oeffne die TwoWorlds.par aus WDFiles\\Update16.wd - die, die das Spiel benutzt.',
+    'One group of the par: player, NPCs, enemies, weapons ... The tree is grouped the same way. Click for the guide.':
+        'Eine Gruppe der Par: Spieler, NPCs, Gegner, Waffen ... Der Baum ist genauso gruppiert. Klick oeffnet den Guide.',
+    'Type to keep only matching entries: name, sheet or text field. Several words must all match. Click for the guide.':
+        'Tippen laesst nur passende Eintraege stehen: Name, Blatt oder Textfeld. Mehrere Woerter muessen alle passen. Klick oeffnet den Guide.',
+    'Groups, below them the SDK sheets, below those the entries. Right-click an entry to duplicate, rename or delete it.':
+        'Gruppen, darunter die SDK-Blaetter, darunter die Eintraege. Rechtsklick auf einen Eintrag dupliziert, benennt um oder loescht.',
+    'Every field with its SDK name; hover a name for the description. Red border = not a valid value, the old one is kept.':
+        'Jedes Feld mit seinem SDK-Namen; ueber dem Namen schweben zeigt die Beschreibung. Roter Rand = kein gueltiger Wert, der alte bleibt.',
+    'Source: your file. Input: the file with the changes to take over. Original: the untouched retail par as reference. Compare, tick rows, Merge.':
+        'Source: deine Datei. Input: die Datei mit den Aenderungen. Original: die unveraenderte Retail-Par als Bezug. Compare, Zeilen anhaken, Merge.',
+    'Update': 'Update', 'GitHub was not reachable: {err}': 'GitHub war nicht erreichbar: {err}',
+    'You have the latest version ({version}).': 'Du hast die neueste Version ({version}).',
+    'Update available: version {version}': 'Update verfuegbar: Version {version}',
+    'Version {version} is out': 'Version {version} ist da',
+    'You have {current}. The update downloads the exe from GitHub, checks its SHA-256 checksum, closes the tool and starts version {version}. The old exe stays as .old until the next start.':
+        'Du hast {current}. Das Update laedt die Exe von GitHub, prueft ihre SHA-256-Pruefsumme, schliesst das Tool und startet Version {version}. Die alte Exe bleibt bis zum naechsten Start als .old liegen.',
+    'Later': 'Spaeter', 'Skip this version': 'Diese Version ueberspringen', 'Update now': 'Jetzt aktualisieren',
+    'Open release page': 'Release-Seite oeffnen', 'View on GitHub': 'Auf GitHub ansehen', 'Downloading ...': 'Lade ...',
+    'Downloading {done} of {total} MB ...': 'Lade {done} von {total} MB ...',
+    'Update failed, nothing was changed: {err}': 'Update fehlgeschlagen, nichts wurde geaendert: {err}',
+    'Checksum matches. The tool closes and starts the new version.': 'Pruefsumme stimmt. Das Tool schliesst sich und startet die neue Version.',
+    'This release has no checksum. Without one the tool installs nothing; Update now opens the release page.':
+        'Dieses Release hat keine Pruefsumme. Ohne Pruefsumme installiert das Tool nichts; Jetzt aktualisieren oeffnet die Release-Seite.',
     'File': 'Datei', 'Edit': 'Bearbeiten', 'View': 'Ansicht', 'Compare': 'Vergleich', 'Help': 'Hilfe',
     'Open PAR...': 'PAR oeffnen...', 'Open JSON...': 'JSON oeffnen...', 'Save': 'Speichern',
     'Save As...': 'Speichern unter...', 'Export JSON...': 'JSON exportieren...', 'Exit': 'Beenden',
@@ -3197,6 +3616,7 @@ DE = {
 
 
 def _check_translations():
+    guidebook.check_sources()
     for k in list(DE):
         assert set(re.findall(r'\{\w+\}', k)) == set(re.findall(r'\{\w+\}', DE[k])), k
     for s in GUIDE_STEPS:
@@ -3213,7 +3633,7 @@ if __name__ == '__main__':
         elif cmd == '--export' and len(sys.argv) > 3:
             cli_export(sys.argv[2], sys.argv[3])
         elif cmd == '--help':
-            print("TW1 PAR Editor v1.4")
+            print(f"TW1 PAR Editor v{VERSION}")
             print()
             print("GUI:   python tw1_par_editor.py")
             print("Info:  python tw1_par_editor.py --info file.par")
