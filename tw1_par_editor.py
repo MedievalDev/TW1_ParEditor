@@ -11,6 +11,7 @@ import json
 import io
 import zlib
 import copy
+import time
 from pathlib import Path
 from collections import OrderedDict
 
@@ -128,6 +129,7 @@ class ParFile:
         self.wrapper_header = None   # zlib wrapper header (stream 1)
         self.was_compressed = False   # file was zlib-compressed on disk
         self.trailing_data = None     # bytes after parsed content
+        self.wd_entry = None          # directory entry of the par when read from a .wd
 
 class ParList:
     """A list within the PAR file."""
@@ -499,6 +501,288 @@ def compress_par_file(par_data, wrapper=None):
         return stream1 + stream2
     else:
         return zlib.compress(par_data)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WD ARCHIVES (the game keeps Parameters\TwoWorlds.par inside WDFiles\*.wd)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Layout (WD 0x200, measured on all 19 archives of the Epic Edition):
+#   zlib( FF A1 D0 31 'WD' 00 02 + 16-byte archive GUID )
+#   file data, one blob per entry (zlib when flag 0x01)
+#   zlib( u64 filetime, u16 count, entries )          directory
+#   u32 directory length + 4
+# Entry: u8 len, name, u8 flags, u32 offset, u32 packed, u32 size,
+#        [0x08: u8 len + resource name] [0x10: u32 class id] [0x20: 16-byte GUID]
+# Inside the archive the par is the bare PAR stream ("PAR\0"), not the
+# two-stream loose file. Every retail and community archive stores it as
+# Parameters\TwoWorlds.par, flags 0x39, resource "translateGameParams", id 1536.
+
+WD_MAGIC = bytes([0xFF, 0xA1, 0xD0, 0x31, 0x57, 0x44, 0x00, 0x02])
+WD_PAR_PATH = 'Parameters\\TwoWorlds.par'
+WD_PAR_META = {'flags': 0x39, 'res': b'translateGameParams', 'id': 1536}
+# GUID of the par in Update16.wd (and GraphicsUpdate3.wd). Used when a par
+# carries no GUID of its own: the Kira mod ships its par with exactly this
+# one, the game runs it and savegames made with it keep loading.
+WD_PAR_GUID = bytes.fromhex('71be7d2d9e1de54e99cf89696bd2246e')
+WRAPPER_MAGIC = bytes([0xFF, 0xA1, 0xD0])
+
+
+def wrapper_to_meta(wrapper):
+    """Stream 1 of a loose .par = the WD directory metadata of that file:
+    FF A1 D0, flags, [0x08: u8 len + resource], [0x10: u32 id], [0x20: GUID].
+    That is how buglord's wdio (unpack -p) and the SDK tools store it.
+    Returns a dict like a directory entry, or None when it is not that layout."""
+    if not wrapper or wrapper[:3] != WRAPPER_MAGIC or len(wrapper) < 4:
+        return None
+    flags = wrapper[3]
+    off = 4
+    res = kid = guid = None
+    try:
+        if flags & 0x08:
+            n = wrapper[off]; off += 1
+            res = wrapper[off:off + n]; off += n
+        if flags & 0x10:
+            kid = struct.unpack_from('<I', wrapper, off)[0]; off += 4
+        if flags & 0x20:
+            guid = wrapper[off:off + 16]; off += 16
+    except (IndexError, struct.error):
+        return None
+    if guid is not None and len(guid) != 16:
+        return None
+    return {'path': WD_PAR_PATH, 'flags': flags, 'res': res, 'id': kid, 'guid': guid}
+
+
+def meta_to_wrapper(e):
+    """Inverse of wrapper_to_meta: the stream-1 bytes for a loose .par."""
+    flags = e.get('flags', WD_PAR_META['flags']) | 0x01
+    b = WRAPPER_MAGIC + bytes([flags])
+    if flags & 0x08:
+        res = e.get('res') or WD_PAR_META['res']
+        b += bytes([len(res)]) + res
+    if flags & 0x10:
+        b += struct.pack('<I', e.get('id') if e.get('id') is not None else WD_PAR_META['id'])
+    if flags & 0x20:
+        b += e.get('guid') or WD_PAR_GUID
+    return b
+FILETIME_EPOCH = 116444736000000000
+
+
+def is_wd(raw_head):
+    """True if the bytes start a WD archive (zlib head stream with the WD magic)."""
+    if len(raw_head) < 2 or raw_head[0] != 0x78:
+        return False
+    try:
+        return zlib.decompressobj().decompress(raw_head[:256], 8)[:8] == WD_MAGIC
+    except zlib.error:
+        return False
+
+
+def wd_directory(raw):
+    """Parse the directory of a WD archive held in memory: (head_len, entries)."""
+    dir_len = struct.unpack_from('<I', raw, len(raw) - 4)[0]
+    t = zlib.decompressobj().decompress(raw[len(raw) - dir_len:])
+    off = 8
+    n = struct.unpack_from('<H', t, off)[0]
+    off += 2
+    out = []
+    for _ in range(n):
+        nl = t[off]; off += 1
+        name = t[off:off + nl].decode('latin-1'); off += nl
+        flags, foff, clen, rlen = struct.unpack_from('<BIII', t, off); off += 13
+        res = kid = guid = None
+        if flags & 0x08:
+            xl = t[off]; off += 1
+            res = t[off:off + xl]; off += xl
+        if flags & 0x10:
+            kid = struct.unpack_from('<I', t, off)[0]; off += 4
+        if flags & 0x20:
+            guid = t[off:off + 16]; off += 16
+        out.append({'path': name, 'flags': flags, 'offset': foff, 'clen': clen,
+                    'rlen': rlen, 'res': res, 'id': kid, 'guid': guid})
+    d = zlib.decompressobj()
+    d.decompress(raw[:64])
+    head_len = 64 - len(d.unused_data) if d.eof else min(e['offset'] for e in out)
+    return head_len, out
+
+
+def wd_entry_data(raw, e):
+    blob = raw[e['offset']:e['offset'] + e['clen']]
+    if e['flags'] & 0x01:
+        return zlib.decompressobj().decompress(blob)
+    return blob
+
+
+def _pick_par(entries):
+    """The par entry of an archive: Parameters\\TwoWorlds.par, else the first *.par."""
+    pars = [e for e in entries if e['path'].lower().endswith('.par')]
+    if not pars:
+        return None
+    return next((p for p in pars if p['path'].lower() == WD_PAR_PATH.lower()), pars[0])
+
+
+def wd_find_par(raw):
+    """(par_bytes, entry) of the TwoWorlds.par inside a WD archive."""
+    _, entries = wd_directory(raw)
+    e = _pick_par(entries)
+    if e is None:
+        raise ValueError(tr("This .wd archive holds no TwoWorlds.par ({n} files inside).").format(n=len(entries)))
+    data = wd_entry_data(raw, e)
+    if data[:4] != PAR_MAGIC:
+        data, _, _ = decompress_par_file(data)
+    return data, e
+
+
+def _wd_entry_bytes(path, flags, offset, clen, rlen, res, kid, guid):
+    name = path.encode('latin-1')
+    b = bytes([len(name)]) + name + struct.pack('<BIII', flags, offset, clen, rlen)
+    if flags & 0x08:
+        b += bytes([len(res)]) + res
+    if flags & 0x10:
+        b += struct.pack('<I', kid)
+    if flags & 0x20:
+        b += guid
+    return b
+
+
+def wd_write(out_path, head, files):
+    """Write a WD archive. files: list of (entry_meta, packed_blob)."""
+    body = bytearray()
+    tab = bytearray(struct.pack('<QH', int(time.time() * 10000000) + FILETIME_EPOCH, len(files)))
+    offset = len(head)
+    for e, blob in files:
+        tab += _wd_entry_bytes(e['path'], e['flags'], offset, len(blob), e['rlen'],
+                               e.get('res'), e.get('id'), e.get('guid'))
+        body += blob
+        offset += len(blob)
+    cdir = zlib.compress(bytes(tab))
+    tmp = out_path + '.tmp'
+    try:
+        with open(tmp, 'wb') as f:
+            f.write(head)
+            f.write(body)
+            f.write(cdir)
+            f.write(struct.pack('<I', len(cdir) + 4))
+        os.replace(tmp, out_path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _par_entry(par_data, like=None):
+    """Directory entry + packed blob for a par, metadata copied from `like`.
+
+    Same flags, resource name, class id and GUID as the par it came from:
+    that is how the Kira mod (Yamalin.wd) ships its par, the game takes it,
+    and savegames keep the par fingerprint they were made with.
+    """
+    like = like or {}
+    e = {'path': like.get('path') or WD_PAR_PATH,
+         'flags': like.get('flags', WD_PAR_META['flags']) | 0x01,
+         'res': like.get('res') or WD_PAR_META['res'],
+         'id': like.get('id') if like.get('id') is not None else WD_PAR_META['id'],
+         'guid': like.get('guid') or WD_PAR_GUID,
+         'rlen': len(par_data)}
+    e['flags'] |= 0x08 | 0x10 | 0x20
+    return e, zlib.compress(par_data, 9)
+
+
+def wd_new_with_par(out_path, par_data, like=None):
+    """A new one-file mod archive that carries only the par."""
+    head = zlib.compress(WD_MAGIC + os.urandom(16))
+    wd_write(out_path, head, [_par_entry(par_data, like)])
+
+
+def wd_replace_par(src_path, out_path, par_data, like=None):
+    """Copy a WD archive and swap its par; every other file is copied packed as
+    it is. An archive without a par gets one, with the metadata of `like`."""
+    with open(src_path, 'rb') as f:
+        raw = f.read()
+    head_len, entries = wd_directory(raw)
+    target = _pick_par(entries)
+    files = []
+    for e in entries:
+        if e is target:
+            files.append(_par_entry(par_data, e))
+        else:
+            files.append((e, raw[e['offset']:e['offset'] + e['clen']]))
+    if target is None:
+        files.append(_par_entry(par_data, like))
+    wd_write(out_path, raw[:head_len], files)
+
+
+def write_par_target(path, par, par_data=None, replace=False):
+    """Write `par` to `path`: a .wd gets the par swapped in (or a new one-file
+    mod archive; replace=True writes a one-file archive over an existing one),
+    anything else the loose .par in the layout it was read in.
+    Returns (bytes written, 'wd' | 'zlib' | 'raw')."""
+    par_data = par_data if par_data is not None else write_par(par)
+    if in_game_wdfiles(path):
+        raise ValueError(tr("The editor never writes into the game's WDFiles folder. Save the mod into the Mods folder instead."))
+    if path.lower().endswith('.wd'):
+        existing = False
+        if os.path.isfile(path) and not replace:
+            with open(path, 'rb') as f:
+                existing = is_wd(f.read(256))
+        if existing:
+            wd_replace_par(path, path, par_data, like=par.wd_entry or wrapper_to_meta(par.wrapper_header))
+        else:
+            wd_new_with_par(path, par_data, like=par.wd_entry or wrapper_to_meta(par.wrapper_header))
+        return os.path.getsize(path), 'wd'
+    if par.was_compressed:
+        out = compress_par_file(par_data, par.wrapper_header)
+    elif par.wd_entry is not None:
+        # a par out of a .wd, saved loose: same two-stream layout as the
+        # shipped file (metadata stream + PAR stream), so buglord's wdio and
+        # this editor pack it back with the right directory entry
+        out = compress_par_file(par_data, meta_to_wrapper(par.wd_entry))
+    else:
+        out = par_data
+    with open(path, 'wb') as f:
+        f.write(out)
+    return len(out), ('zlib' if par.was_compressed or par.wd_entry is not None else 'raw')
+
+
+def read_par_source(path):
+    """Read a .par (loose, two-stream or bare) or the par inside a .wd.
+
+    Returns (par_data, wrapper, was_compressed, wd_entry_or_None).
+    """
+    with open(path, 'rb') as f:
+        raw = f.read()
+    if is_wd(raw[:256]):
+        data, e = wd_find_par(raw)
+        return data, None, False, e
+    par_data, wrapper, was_compressed = decompress_par_file(raw)
+    return par_data, wrapper, was_compressed, None
+
+
+def in_game_wdfiles(path):
+    """True for any path inside a game's WDFiles folder (the folder next to the
+    game exe or the Mods folder) - the editor never writes there."""
+    p = os.path.abspath(path)
+    parts = p.split(os.sep)
+    for i in range(len(parts) - 1, 0, -1):
+        if parts[i].lower() == 'wdfiles':
+            game = os.sep.join(parts[:i]) or os.sep
+            if (i == len(parts) - 2 or any(os.path.exists(os.path.join(game, n)) for n in
+                    ('TwoWorlds.exe', 'TwoWorldsExtended.exe', 'Mods'))):
+                return True
+    return False
+
+
+def mods_dir_for(path):
+    """<game>\\Mods next to the WDFiles folder of `path`, created if missing."""
+    game = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+    d = os.path.join(game, 'Mods')
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        return os.path.dirname(os.path.abspath(path))
+    return d
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -967,8 +1251,9 @@ GUIDE_STEPS = [
      'spell, potion and object lives in it. Changes are written back byte-exact; the file '
      'on disk is backed up before it is overwritten.'},
     {'title': 'Open', 'widget': 'btn_open', 'text':
-     'Open a TwoWorlds.par. The game runs the one from WDFiles\\Update16.wd - unpack that '
-     'one, not Parameters.wd (old 1.0 layout, the editor warns about it).'},
+     'Open a TwoWorlds.par or a whole .wd archive - the editor finds the par inside. The game '
+     'runs the one in WDFiles\\Update16.wd, not Parameters.wd (old 1.0 layout, the editor warns). '
+     'Saving never touches the game archive: it writes a mod .wd into the Mods folder.'},
     {'title': 'Groups and sheets', 'widget': 'tree', 'text':
      'The tree is grouped: Player, NPCs, Enemies, Weapons ... Below each group sit the SDK '
      'sheets (Units, Weapon, Traps) and their entries. The dropdown shows one group only. '
@@ -1133,8 +1418,7 @@ class ParEditorApp:
                 iid = f"L{li}E{ei}"
                 if self.tree.exists(iid):
                     self._open_list(f"L{li}")
-                    self.tree.selection_set(iid)
-                    self.tree.see(iid)
+                    self._select_iid(iid)
                     self._show_entry(li, ei)
             if c.get('tab'):
                 self.notebook.select(c['tab'])
@@ -1205,6 +1489,10 @@ class ParEditorApp:
 
     def _confirm_discard(self):
         """True when unsaved changes may be dropped (asks to save first)."""
+        try:
+            self._apply_current_edits()      # a value still being typed counts
+        except Exception:
+            pass
         if not self.modified:
             return True
         r = messagebox.askyesnocancel(tr("Unsaved Changes"), tr("Save changes first?"), parent=self.root)
@@ -1311,16 +1599,17 @@ class ParEditorApp:
         if not self.filepath:
             messagebox.showinfo(tr("Restore backup"), tr("Open a .par first - backups sit next to it."), parent=self.root)
             return
-        bdir = os.path.join(os.path.dirname(self.filepath), '_backup')
+        bdir = self._backup_dir(self.filepath)
         if not os.path.isdir(bdir):
             messagebox.showinfo(tr("Restore backup"), tr("No _backup folder next to this file yet."), parent=self.root)
             return
         p = filedialog.askopenfilename(title=tr("Restore backup"), initialdir=bdir,
-                                       filetypes=[("PAR backups", "*.par"), ("All Files", "*.*")])
+                                       filetypes=[(tr("PAR or WD backups"), "*.par *.wd"), ("All Files", "*.*")])
         if not p or not self._confirm_discard():
             return
         target = self.filepath
-        self._load_par(p)
+        if not self._load_par(p):
+            return
         self.filepath = target
         self.par.filepath = target
         self.modified = True
@@ -1602,7 +1891,7 @@ class ParEditorApp:
         # Empty state: never a blank pane without a way forward (7.4)
         self.empty_box = ttk.Frame(tree_container, style='Panel.TFrame', padding=16)
         ttk.Label(self.empty_box, text=tr("No file loaded"), style='PanelTitle.TLabel').pack()
-        ttk.Label(self.empty_box, text=tr("Open the TwoWorlds.par from WDFiles\\Update16.wd - the one the game runs."),
+        ttk.Label(self.empty_box, text=tr("Open WDFiles\\Update16.wd (or a TwoWorlds.par) - the par the game runs."),
                   style='PanelMuted.TLabel', wraplength=260, justify='center').pack(pady=(0, 10))
         ttk.Button(self.empty_box, text=tr("Open PAR...") + "  (Ctrl+O)", style='Accent.TButton',
                    command=self._open_par).pack()
@@ -1715,9 +2004,12 @@ class ParEditorApp:
     # ── File Operations ──
 
     def _open_par(self):
+        if not self._confirm_discard():
+            return
         path = filedialog.askopenfilename(
-            title="Open PAR File",
-            filetypes=[("PAR Files", "*.par"), ("All Files", "*.*")]
+            title=tr("Open PAR or WD archive"),
+            filetypes=[(tr("PAR or WD archive"), "*.par *.wd"), ("PAR Files", "*.par"),
+                       (tr("WD archives"), "*.wd"), ("All Files", "*.*")]
         )
         if not path:
             return
@@ -1725,14 +2017,12 @@ class ParEditorApp:
 
     def _load_par(self, path):
         try:
-            with open(path, 'rb') as f:
-                raw_data = f.read()
-
-            par_data, wrapper, was_compressed = decompress_par_file(raw_data)
+            par_data, wrapper, was_compressed, wd_e = read_par_source(path)
             self.par = read_par(par_data)
             self.par.filepath = path
             self.par.wrapper_header = wrapper
             self.par.was_compressed = was_compressed
+            self.par.wd_entry = wd_e
             self.filepath = path
             self.modified = False
             self._backed_up = set()
@@ -1745,6 +2035,8 @@ class ParEditorApp:
 
             total_entries = sum(len(pl.entries) for pl in self.par.lists)
             comp_str = "  [zlib]" if was_compressed else ""
+            if wd_e:
+                comp_str = f"  >  {wd_e['path']}"
             self.file_label.configure(
                 text=f"{Path(path).name}{comp_str}  |  {len(self.par.lists)} lists, "
                      f"{total_entries} entries  |  "
@@ -1758,15 +2050,23 @@ class ParEditorApp:
                 # Parameters.wd carries the 1.0 layout; the game actually runs
                 # the par from Update16.wd, which matches the SDK sheets.
                 layout = (f" — WARNING: {inexact} lists do not match the SDK sheets "
-                          f"(old 1.0 layout? open the par from Update16.wd)")
+                          f"(old 1.0 layout? open Update16.wd)")
+            where = ''
+            if wd_e:
+                where = (tr(" (par from the archive - Save writes a mod .wd to Mods, the game archive stays untouched)")
+                         if in_game_wdfiles(path) else tr(" (par from the archive - Save swaps it inside this .wd)"))
             self._set_status(f"Opened {Path(path).name} — "
                             f"{len(self.par.lists)} lists, {total_entries} entries, "
                             f"{resolved} lists matched to SDK sheets"
-                            f"{' (zlib compressed)' if was_compressed else ''}{layout}")
+                            f"{' (zlib compressed)' if was_compressed else ''}{where}{layout}")
+            return True
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to open:\n{e}")
+            messagebox.showerror(tr("Error"), tr("Failed to open:") + f"\n{e}")
+            return False
 
     def _open_json(self):
+        if not self._confirm_discard():
+            return
         path = filedialog.askopenfilename(
             title="Open JSON File",
             filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
@@ -1775,8 +2075,9 @@ class ParEditorApp:
             return
         try:
             self.par = import_json(path)
-            self.filepath = path.replace('.json', '.par')
-            self.par.filepath = self.filepath
+            self.filepath = ''              # first save goes through Save As
+            self.par.filepath = ''
+            self._json_stem = Path(path).stem
             self.modified = True
             self._backed_up = set()
             self.undo_stack.clear()
@@ -1800,20 +2101,59 @@ class ParEditorApp:
         if not self.filepath or self.filepath.endswith('.json'):
             self._save_as()
             return
+        if self.filepath.lower().endswith('.wd') and in_game_wdfiles(self.filepath):
+            self._save_as()          # never write into the game's own archives
+            return
         self._do_save(self.filepath)
 
     def _save_as(self):
         if not self.par:
             return
+        src = self.filepath or ''
+        if self.par.wd_entry is not None:
+            # par came out of a .wd: offer a mod archive in <game>\Mods first
+            initialdir = mods_dir_for(src) if in_game_wdfiles(src) else os.path.dirname(src)
+            initialfile = tr("MyParameters") + ".wd" if in_game_wdfiles(src) else Path(src).name
+            types = [(tr("Mod archive"), "*.wd"), ("PAR Files", "*.par"), ("All Files", "*.*")]
+            ext = ".wd"
+        else:
+            initialdir = os.path.dirname(src) if src else None
+            initialfile = Path(src).name if src else (getattr(self, '_json_stem', '') or "TwoWorlds") + ".par"
+            types = [("PAR Files", "*.par"), (tr("Mod archive"), "*.wd"), ("All Files", "*.*")]
+            ext = ".par"
         path = filedialog.asksaveasfilename(
-            title="Save PAR File",
-            defaultextension=".par",
-            filetypes=[("PAR Files", "*.par"), ("All Files", "*.*")],
-            initialfile=Path(self.filepath).name if self.filepath else "TwoWorlds.par"
+            title=tr("Save PAR or mod archive"),
+            defaultextension=ext,
+            filetypes=types,
+            initialdir=initialdir,
+            initialfile=initialfile
         )
         if not path:
             return
-        self._do_save(path)
+        if in_game_wdfiles(path):
+            messagebox.showerror(tr("Not saved"), tr("The editor never writes into the game's WDFiles folder. Save the mod into the Mods folder instead."), parent=self.root)
+            return
+        replace = False
+        if (path.lower().endswith('.wd') and os.path.isfile(path)
+                and os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.abspath(src or ' '))):
+            r = messagebox.askyesnocancel(
+                tr("Archive exists"),
+                tr("{name} already exists.\n\nYes: swap only the par inside it, keep its other files.\nNo: replace the whole archive with one that holds only the par.").format(
+                    name=os.path.basename(path)), parent=self.root)
+            if r is None:
+                return
+            replace = not r
+        self._do_save(path, replace=replace)
+
+    @staticmethod
+    def _backup_dir(path):
+        """_backup next to the file - except for archives in a Mods folder:
+        a copy there could be picked up as a mod, so those go to the
+        tool's data folder."""
+        folder = os.path.dirname(os.path.abspath(path))
+        if path.lower().endswith('.wd') and os.path.basename(folder).lower() == 'mods':
+            return os.path.join(data_dir(), 'backup')
+        return os.path.join(folder, '_backup')
 
     def _backup(self, path):
         """Copy the file about to be overwritten into _backup\\ next to it.
@@ -1824,8 +2164,7 @@ class ParEditorApp:
         if not os.path.isfile(path) or path in self._backed_up:
             return None
         import shutil
-        import time
-        bdir = os.path.join(os.path.dirname(path), '_backup')
+        bdir = self._backup_dir(path)
         os.makedirs(bdir, exist_ok=True)
         stem, ext = os.path.splitext(os.path.basename(path))
         dst = os.path.join(bdir, f"{stem}.{time.strftime('%Y-%m-%d_%H-%M-%S')}{ext}")
@@ -1833,7 +2172,7 @@ class ParEditorApp:
         self._backed_up.add(path)
         return dst
 
-    def _do_save(self, path):
+    def _do_save(self, path, replace=False):
         try:
             self._apply_current_edits()
             if self._invalid:
@@ -1844,23 +2183,19 @@ class ParEditorApp:
                     f"Fix them (red border) or restore the old value.")
                 return
             par_data = write_par(self.par)
-
-            # Re-compress if the original was compressed
-            if self.par.was_compressed:
-                out_data = compress_par_file(par_data, self.par.wrapper_header)
-            else:
-                out_data = par_data
-
             backup = self._backup(path)
-            with open(path, 'wb') as f:
-                f.write(out_data)
+            size, what = write_par_target(path, self.par, par_data, replace=replace)
+            if path.lower().endswith('.wd'):
+                # from now on the par lives in this archive: later saves swap it there
+                with open(path, 'rb') as f:
+                    self.par.wd_entry = wd_find_par(f.read())[1]
             self.filepath = path
             self.par.filepath = path
             self.modified = False
             self._update_title()
-            comp_str = " (zlib)" if self.par.was_compressed else ""
             bak_str = f"  |  backup: _backup\\{os.path.basename(backup)}" if backup else ""
-            self._set_status(f"Saved {Path(path).name} ({len(out_data)} bytes{comp_str}){bak_str}")
+            hint = tr("  |  the game loads it at the next start; switch it in the Mod Manager") if what == 'wd' else ''
+            self._set_status(f"Saved {Path(path).name} ({size} bytes{' (zlib)' if what == 'zlib' else ''}){bak_str}{hint}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save:\n{e}")
 
@@ -1885,13 +2220,8 @@ class ParEditorApp:
             messagebox.showerror("Error", f"Failed to export:\n{e}")
 
     def _on_close(self):
-        if self.modified:
-            r = messagebox.askyesnocancel("Unsaved Changes",
-                                           "Save changes before closing?")
-            if r is None:
-                return
-            if r:
-                self._save()
+        if not self._confirm_discard():
+            return
         self.root.destroy()
 
     def _update_title(self):
@@ -2023,8 +2353,7 @@ class ParEditorApp:
             iid = f"L{li}E{ei}"
             if self.tree.exists(iid):
                 self._open_list(f"L{li}")
-                self.tree.selection_set(iid)
-                self.tree.see(iid)
+                self._select_iid(iid)
 
     def _open_list(self, list_iid):
         """Expand a list node and the category above it."""
@@ -2125,7 +2454,9 @@ class ParEditorApp:
         self.detail_info.configure(text=info)
         self._invalid = {}
 
-        parent = self.detail_inner
+        # rows are built in a frame that is not mapped yet and shown in one go:
+        # Tk then lays the panel out once instead of after every row
+        parent = tk.Frame(self.detail_inner, bg=self.BG2)
 
         for fi, field in enumerate(entry.fields):
             row = tk.Frame(parent, bg=self.BG2)
@@ -2220,14 +2551,14 @@ class ParEditorApp:
                     font=('Consolas', 10))
                 arr_label.pack(side='left', padx=(0, 8))
 
-                # Show array contents below
-                if arr:
+                # Show array contents below - also when empty, one item per line
+                if True:
                     arr_frame = tk.Frame(row, bg=self.BG2)
                     arr_frame.pack(fill='x', padx=(90, 0))
 
                     arr_text = tk.Text(arr_frame, bg=self.BG4, fg=self.FG,
                                         font=('Consolas', 9), relief='flat',
-                                        height=min(len(arr), 8),
+                                        height=max(1, min(len(arr), 8)),
                                         insertbackground=self.FG,
                                         highlightthickness=1,
                                         highlightcolor=self.ACCENT,
@@ -2246,16 +2577,39 @@ class ParEditorApp:
             sep = tk.Frame(parent, bg=self.BG3, height=1)
             sep.pack(fill='x', padx=4, pady=1)
 
+        parent.pack(fill='x')
+
+        # text as shown: a field is only parsed back when its text changed,
+        # so viewing an entry never rewrites floats or string arrays
+        self._shown = {fi: self._widget_text(w) for fi, _dt, w in self.edit_widgets}
+
+    @staticmethod
+    def _widget_text(w):
+        return w.get('1.0', 'end-1c') if isinstance(w, tk.Text) else w.get()
+
+    @staticmethod
+    def _parse_scalar(text, dtype):
+        """Text -> value for an int/uint/float field; ValueError if it does not fit."""
+        if dtype in (TYPE_INT32, TYPE_UINT32, TYPE_ARRAY_INT32, TYPE_ARRAY_UINT32):
+            v = int(text.strip(), 0)                  # 0x.. allowed
+            lo, hi = ((-2**31, 2**31 - 1) if dtype in (TYPE_INT32, TYPE_ARRAY_INT32)
+                      else (0, 2**32 - 1))
+            if not lo <= v <= hi:
+                raise ValueError('out of range')
+            return v
+        v = float(text.strip().replace(',', '.'))
+        try:
+            struct.pack('<f', v)                     # 1e39 does not fit a float32
+        except (OverflowError, struct.error):
+            raise ValueError('out of range')
+        return v
+
     @staticmethod
     def _value_ok(text, dtype):
         """Would _apply_current_edits accept this text for the type?"""
         try:
-            if dtype in (TYPE_INT32, TYPE_UINT32):
-                v = int(text.strip(), 0)
-                lo, hi = (-2**31, 2**31 - 1) if dtype == TYPE_INT32 else (0, 2**32 - 1)
-                return lo <= v <= hi
-            if dtype == TYPE_FLOAT32:
-                float(text.strip().replace(',', '.'))
+            if dtype in (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32):
+                ParEditorApp._parse_scalar(text, dtype)
             return True
         except (ValueError, TypeError):
             return False
@@ -2378,6 +2732,7 @@ class ParEditorApp:
 
     def _duplicate_entry(self, li, ei):
         """Deep-copy an entry, ask for new name, insert after original."""
+        self._apply_current_edits()          # a value still being typed goes in first
         if not self.par or li >= len(self.par.lists):
             return
         pl = self.par.lists[li]
@@ -2445,14 +2800,14 @@ class ParEditorApp:
         new_item_id = f"L{li}E{ei + 1}"
         parent_id = f"L{li}"
         self._open_list(parent_id)
-        self.tree.selection_set(new_item_id)
-        self.tree.see(new_item_id)
+        self._select_iid(new_item_id)
         self.tree.focus(new_item_id)
 
         self._set_status(f"Duplicated '{src.name}' → '{new_name}'")
 
     def _rename_entry(self, li, ei):
         """Rename an entry."""
+        self._apply_current_edits()          # a value still being typed goes in first
         if not self.par or li >= len(self.par.lists):
             return
         entry = self.par.lists[li].entries[ei]
@@ -2466,6 +2821,13 @@ class ParEditorApp:
         if not new_name or not new_name.strip() or new_name.strip() == old_name:
             return
         new_name = new_name.strip()
+        # the game and Compare & Merge find entries by name: two with the same
+        # name hide each other
+        if any(e.name == new_name for pl in self.par.lists for e in pl.entries):
+            if not messagebox.askyesno(tr("Name exists"),
+                                       tr("'{name}' already exists.\nRename anyway?").format(name=new_name),
+                                       parent=self.root):
+                return
 
         self.push_undo(('entry', li, ei), tr("rename {name}").format(name=old_name))
         entry.name = new_name
@@ -2488,14 +2850,14 @@ class ParEditorApp:
         item_id = f"L{li}E{ei}"
         parent_id = f"L{li}"
         self._open_list(parent_id)
-        self.tree.selection_set(item_id)
-        self.tree.see(item_id)
+        self._select_iid(item_id)
 
         extra = f" (+{updated_fields} fields)" if updated_fields else ""
         self._set_status(f"Renamed '{old_name}' → '{new_name}'{extra}")
 
     def _delete_entry(self, li, ei):
         """Delete an entry after confirmation."""
+        self._apply_current_edits()          # a value still being typed goes in first
         if not self.par or li >= len(self.par.lists):
             return
         pl = self.par.lists[li]
@@ -2518,6 +2880,7 @@ class ParEditorApp:
 
     def _add_entry_to_list(self, li):
         """Add a new empty entry to a list. Copies field structure from existing entries."""
+        self._apply_current_edits()          # a value still being typed goes in first
         if not self.par or li >= len(self.par.lists):
             return
         pl = self.par.lists[li]
@@ -2565,8 +2928,7 @@ class ParEditorApp:
         item_id = f"L{li}E{new_ei}"
         parent_id = f"L{li}"
         self._open_list(parent_id)
-        self.tree.selection_set(item_id)
-        self.tree.see(item_id)
+        self._select_iid(item_id)
 
         self._set_status(f"Added '{new_name}' to List {li}")
 
@@ -2581,8 +2943,26 @@ class ParEditorApp:
             return f"{prefix}{num + 1:0{width}d}"
         return name + "_COPY"
 
+    def _select_iid(self, iid):
+        """Select and show a tree row - if the filter or group hides it, say so."""
+        if self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
+        else:
+            self._set_status(tr("Done - the entry is hidden by the current filter or group."))
+
     def _clear_detail(self):
         """Clear the detail panel."""
+        # the input checks hang on the StringVars; Tcl keeps those callbacks
+        # (and with them var and widget) alive until the trace is removed -
+        # without this every selected entry leaked ~60 Tcl commands
+        for _fi, _dt, var in getattr(self, 'edit_widgets', []):
+            if isinstance(var, tk.Variable):
+                try:
+                    for mode, cb in var.trace_info():
+                        var.trace_remove(mode, cb)
+                except tk.TclError:
+                    pass
         for w in self.detail_inner.winfo_children():
             w.destroy()
         self.detail_header.configure(text=tr("Select an entry"))
@@ -2590,6 +2970,8 @@ class ParEditorApp:
         self.field_error.configure(text="")
         self.edit_widgets = []
         self.current_entry = None
+        self._invalid = {}
+        self._shown = {}
 
     def _apply_current_edits(self):
         """Apply edits from the detail panel back to the data model."""
@@ -2601,23 +2983,17 @@ class ParEditorApp:
         before = self._snapshot(('entry', self.current_li, self.current_ei))
 
         self._invalid = {}
+        shown = getattr(self, '_shown', {})
         for fi, dtype, widget in self.edit_widgets:
             if fi >= len(entry.fields):
                 continue
             field = entry.fields[fi]
+            if shown.get(fi) == self._widget_text(widget):
+                continue                                   # untouched
 
             try:
-                if dtype in (TYPE_INT32, TYPE_UINT32):
-                    new_val = int(widget.get().strip(), 0)     # 0x.. allowed
-                    lo, hi = (-2**31, 2**31 - 1) if dtype == TYPE_INT32 else (0, 2**32 - 1)
-                    if not lo <= new_val <= hi:
-                        raise ValueError('out of range')
-                    if new_val != field.value:
-                        field.value = new_val
-                        changed = True
-
-                elif dtype == TYPE_FLOAT32:
-                    new_val = float(widget.get().strip().replace(',', '.'))
+                if dtype in (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32):
+                    new_val = self._parse_scalar(widget.get(), dtype)
                     if new_val != field.value:
                         field.value = new_val
                         changed = True
@@ -2630,23 +3006,14 @@ class ParEditorApp:
 
                 elif dtype in (TYPE_ARRAY_INT32, TYPE_ARRAY_FLOAT,
                                TYPE_ARRAY_UINT32, TYPE_ARRAY_STR):
-                    # widget is a Text widget
-                    text = widget.get('1.0', 'end').strip()
-                    if text:
-                        lines = [l.strip() for l in text.split('\n')
-                                 if l.strip()]
-                        if dtype == TYPE_ARRAY_INT32:
-                            new_val = [int(l) for l in lines]
-                        elif dtype == TYPE_ARRAY_FLOAT:
-                            new_val = [float(l) for l in lines]
-                        elif dtype == TYPE_ARRAY_UINT32:
-                            new_val = [int(l) for l in lines]
-                        elif dtype == TYPE_ARRAY_STR:
-                            new_val = lines
-                        else:
-                            new_val = field.value
+                    # widget is a Text widget, one item per line
+                    text = widget.get('1.0', 'end-1c')
+                    if dtype == TYPE_ARRAY_STR:
+                        # strings keep empty items and spaces
+                        new_val = text.split('\n') if text else []
                     else:
-                        new_val = []
+                        lines = [l for l in (x.strip() for x in text.split('\n')) if l]
+                        new_val = [self._parse_scalar(l, dtype) for l in lines]
 
                     if new_val != field.value:
                         field.value = new_val
@@ -2659,6 +3026,9 @@ class ParEditorApp:
                 sheet = FieldLabels.sheet_of(self.par, self.current_li) if self.par else None
                 self._invalid[fi] = self.field_labels.get(sheet, fi) or f"[{fi}]"
 
+        for fi, _dt, widget in self.edit_widgets:
+            if fi not in self._invalid:
+                self._shown[fi] = self._widget_text(widget)
         if self._invalid:
             self._set_status(tr("Invalid value kept OLD value: ") + ', '.join(self._invalid.values()))
         if changed:
@@ -2710,8 +3080,7 @@ class ParEditorApp:
         parent_id = f"L{li}"
 
         self._open_list(parent_id)
-        self.tree.selection_set(item_id)
-        self.tree.see(item_id)
+        self._select_iid(item_id)
         self.tree.focus(item_id)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -2866,17 +3235,17 @@ class ParEditorApp:
         """Load and parse a PAR file, return ParFile or None."""
         path = filedialog.askopenfilename(
             title=title,
-            filetypes=[("PAR Files", "*.par"), ("All Files", "*.*")])
+            filetypes=[(tr("PAR or WD archive"), "*.par *.wd"), ("PAR Files", "*.par"),
+                       (tr("WD archives"), "*.wd"), ("All Files", "*.*")])
         if not path:
             return None, ''
         try:
-            with open(path, 'rb') as f:
-                raw = f.read()
-            par_data, wrapper, was_compressed = decompress_par_file(raw)
+            par_data, wrapper, was_compressed, wd_e = read_par_source(path)
             par = read_par(par_data)
             par.filepath = path
             par.wrapper_header = wrapper
             par.was_compressed = was_compressed
+            par.wd_entry = wd_e
             self.field_labels.resolve(par)
             return par, path
         except Exception as e:
@@ -2918,15 +3287,14 @@ class ParEditorApp:
         """Auto-load original PAR from saved config path."""
         if self._cmp_original_path and os.path.isfile(self._cmp_original_path):
             try:
-                with open(self._cmp_original_path, 'rb') as f:
-                    raw = f.read()
-                par_data, wrapper, was_compressed = decompress_par_file(raw)
+                par_data, wrapper, was_compressed, wd_e = read_par_source(self._cmp_original_path)
                 self.cmp_original = read_par(par_data)
                 self.cmp_original.filepath = self._cmp_original_path
+                self.cmp_original.wd_entry = wd_e
                 self.cmp_original_label.configure(
                     text=Path(self._cmp_original_path).name, fg=self.FG)
-            except:
-                pass
+            except Exception as e:
+                self._set_status(tr("Original for compare not loaded: ") + str(e))
 
     # ── Compare: Core Logic ──
 
@@ -3319,19 +3687,14 @@ class ParEditorApp:
         path = filedialog.asksaveasfilename(
             title="Save Merged PAR",
             defaultextension=".par",
-            filetypes=[("PAR Files", "*.par"), ("All Files", "*.*")],
+            filetypes=[("PAR Files", "*.par"), (tr("Mod archive"), "*.wd"), ("All Files", "*.*")],
             initialfile="TwoWorlds_merged.par")
         if not path:
             return
 
         try:
-            par_data = write_par(self.cmp_source)
-            if self.cmp_source.was_compressed:
-                output = compress_par_file(par_data, self.cmp_source.wrapper_header)
-            else:
-                output = par_data
-            with open(path, 'wb') as f:
-                f.write(output)
+            backup = self._backup(path)
+            write_par_target(path, self.cmp_source)
 
             total = sum(len(pl.entries) for pl in self.cmp_source.lists)
             self.cmp_merge_info.configure(
@@ -3365,12 +3728,12 @@ def cli_info(path):
     with open(path, 'rb') as f:
         raw_data = f.read()
 
-    par_data, wrapper, was_compressed = decompress_par_file(raw_data)
+    par_data, wrapper, was_compressed, wd_e = read_par_source(path)
     par = read_par(par_data)
     total = sum(len(pl.entries) for pl in par.lists)
-    print(f"PAR File: {path}")
+    print(f"PAR File: {path}" + (f"  (inside the archive: {wd_e['path']})" if wd_e else ""))
     if was_compressed:
-        print(f"Compressed: zlib ({len(raw_data)} → {len(par_data)} bytes)")
+        print(f"Compressed: zlib ({len(raw_data)} -> {len(par_data)} bytes)")
         if wrapper:
             print(f"Wrapper:  {wrapper!r}")
     print(f"Version:  0x{par.version:X}")
@@ -3389,9 +3752,7 @@ def cli_info(path):
 
 def cli_export(par_path, json_path):
     """Export PAR to JSON."""
-    with open(par_path, 'rb') as f:
-        raw_data = f.read()
-    par_data, wrapper, was_compressed = decompress_par_file(raw_data)
+    par_data, wrapper, was_compressed, _ = read_par_source(par_path)
     par = read_par(par_data)
     export_json(par, json_path)
     total = sum(len(pl.entries) for pl in par.lists)
@@ -3542,8 +3903,8 @@ DE = {
     'Select an entry': 'Eintrag waehlen', 'Invalid value kept OLD value: ': 'Ungueltiger Wert, ALTER Wert bleibt: ',
     'not a whole number (0x.. is fine)': 'keine ganze Zahl (0x.. geht auch)', 'not a number': 'keine Zahl',
     'wolf, traps, units wolf ...': 'wolf, traps, units wolf ...',
-    'Open the TwoWorlds.par from WDFiles\\Update16.wd - the one the game runs.':
-        'Oeffne die TwoWorlds.par aus WDFiles\\Update16.wd - die, die das Spiel benutzt.',
+    'Open WDFiles\\Update16.wd (or a TwoWorlds.par) - the par the game runs.':
+        'Oeffne WDFiles\\Update16.wd (oder eine TwoWorlds.par) - die Par, die das Spiel benutzt.',
     'One group of the par: player, NPCs, enemies, weapons ... The tree is grouped the same way. Click for the guide.':
         'Eine Gruppe der Par: Spieler, NPCs, Gegner, Waffen ... Der Baum ist genauso gruppiert. Klick oeffnet den Guide.',
     'Type to keep only matching entries: name, sheet or text field. Several words must all match. Click for the guide.':
@@ -3599,8 +3960,8 @@ DE = {
     'Welcome': 'Willkommen', 'Lists and sheets': 'Listen und Blaetter', 'Fields': 'Felder',
     'This editor opens the .par parameter database of Two Worlds 1 - every unit, weapon, spell, potion and object lives in it. Changes are written back byte-exact; the file on disk is backed up before it is overwritten.':
         'Dieser Editor oeffnet die .par-Parameterdatenbank von Two Worlds 1 - jede Einheit, Waffe, jeder Zauber, Trank und jedes Objekt steht darin. Aenderungen werden byte-genau zurueckgeschrieben; die Datei auf der Platte wird vorher gesichert.',
-    'Open a TwoWorlds.par. The game runs the one from WDFiles\\Update16.wd - unpack that one, not Parameters.wd (old 1.0 layout, the editor warns about it).':
-        'Oeffne eine TwoWorlds.par. Das Spiel benutzt die aus WDFiles\\Update16.wd - diese entpacken, nicht Parameters.wd (altes 1.0-Layout, der Editor warnt davor).',
+    'Open a TwoWorlds.par or a whole .wd archive - the editor finds the par inside. The game runs the one in WDFiles\\Update16.wd, not Parameters.wd (old 1.0 layout, the editor warns). Saving never touches the game archive: it writes a mod .wd into the Mods folder.':
+        'Oeffne eine TwoWorlds.par oder gleich ein .wd-Archiv - der Editor findet die Par darin. Das Spiel benutzt die in WDFiles\\Update16.wd, nicht Parameters.wd (altes 1.0-Layout, der Editor warnt). Speichern fasst das Spielarchiv nie an: es schreibt eine Mod-.wd in den Mods-Ordner.',
     'The tree is grouped: Player, NPCs, Enemies, Weapons ... Below each group sit the SDK sheets (Units, Weapon, Traps) and their entries. The dropdown shows one group only. Right-click an entry to duplicate, rename or delete it.':
         'Der Baum ist gruppiert: Spieler, NPCs, Gegner, Waffen ... Unter jeder Gruppe liegen die SDK-Blaetter (Units, Weapon, Traps) mit ihren Eintraegen. Das Dropdown zeigt nur eine Gruppe. Rechtsklick auf einen Eintrag dupliziert, benennt um oder loescht.',
     'Groups and sheets': 'Gruppen und Blaetter',
@@ -3612,6 +3973,27 @@ DE = {
         'Strg+S schreibt die Datei an Ort und Stelle, die vorherige Fassung wandert nach _backup daneben. Fuer das Spiel das Ergebnis in ein Mod-Archiv packen (Parameters\\TwoWorlds.par, Flags 0x39).',
     "The second tab compares two .par files field by field and merges chosen changes - handy for bringing another mod's values into yours.":
         'Der zweite Reiter vergleicht zwei .par-Dateien Feld fuer Feld und fuehrt gewaehlte Aenderungen zusammen - praktisch, um die Werte einer anderen Mod in die eigene zu holen.',
+    'PAR or WD archive': 'PAR oder WD-Archiv', 'WD archives': 'WD-Archive',
+    'Open PAR or WD archive': 'PAR oder WD-Archiv oeffnen', 'Mod archive': 'Mod-Archiv',
+    'Save PAR or mod archive': 'PAR oder Mod-Archiv speichern', 'MyParameters': 'MeineParameter',
+    'Not saved': 'Nicht gespeichert', 'PAR or WD backups': 'PAR- oder WD-Sicherungen',
+    "The editor never writes into the game's WDFiles folder. Save the mod into the Mods folder instead.":
+        'Der Editor schreibt nie in den WDFiles-Ordner des Spiels. Speichere die Mod stattdessen in den Mods-Ordner.',
+    'This .wd archive holds no TwoWorlds.par ({n} files inside).':
+        'Dieses .wd-Archiv enthaelt keine TwoWorlds.par ({n} Dateien darin).',
+    ' (par from the archive - Save writes a mod .wd to Mods, the game archive stays untouched)':
+        ' (Par aus dem Archiv - Speichern schreibt eine Mod-.wd nach Mods, das Spielarchiv bleibt unberuehrt)',
+    ' (par from the archive - Save swaps it inside this .wd)':
+        ' (Par aus dem Archiv - Speichern tauscht sie in dieser .wd aus)',
+    'Archive exists': 'Archiv vorhanden', 'Name exists': 'Name vorhanden',
+    "'{name}' already exists.\nRename anyway?": "'{name}' gibt es schon.\nTrotzdem umbenennen?", 'Error': 'Fehler', 'Failed to open:': 'Oeffnen fehlgeschlagen:',
+    "{name} already exists.\n\nYes: swap only the par inside it, keep its other files.\nNo: replace the whole archive with one that holds only the par.":
+        '{name} gibt es schon.\n\nJa: nur die Par darin tauschen, die anderen Dateien bleiben.\nNein: das ganze Archiv durch eines ersetzen, das nur die Par enthaelt.',
+    'Done - the entry is hidden by the current filter or group.':
+        'Erledigt - der Eintrag ist durch den Filter oder die Gruppe ausgeblendet.',
+    'Original for compare not loaded: ': 'Original fuer den Vergleich nicht geladen: ',
+    '  |  the game loads it at the next start; switch it in the Mod Manager':
+        '  |  das Spiel laedt sie beim naechsten Start; schalten im Mod Manager',
 }
 
 

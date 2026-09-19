@@ -4,3 +4,4 @@ build/
 *.spec
 par_editor_settings.json
 _backup/
+backup/

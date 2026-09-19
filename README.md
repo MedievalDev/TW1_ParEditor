@@ -6,6 +6,7 @@ A GUI editor for Two Worlds 1 `.par` parameter files — the core data format th
 
 ## Features
 
+- **Opens the game archives** - pick `WDFiles\Update16.wd`, the editor finds the par inside; saving writes a mod `.wd` into `Mods\`, the game archive is never touched (v1.6)
 - **Full PAR parsing** — reads and writes the binary PAR format byte-perfectly (zlib-compressed dual-stream wrapper included)
 - **2055 SDK field names** — from the official `TwoWorlds.xls` SDK spreadsheet (39 sheets), resolved per list by the entry names, so every field carries the right name (v1.4)
 - **1178 tooltip descriptions** — hover over any field name to see what it does
@@ -147,9 +148,17 @@ These are **not separate PAR fields** — they are all part of the single `mesh`
 
 ## Building Mods
 
-1. Extract `TwoWorlds.par` from the game's WD archives
-2. Open in the editor, modify values or duplicate existing entries to create new objects
-3. Save and repack into a `.wd` file for the `WDFiles` folder
+1. Open `WDFiles\Update16.wd` of the game directly - the editor finds
+   `Parameters\TwoWorlds.par` inside, no unpacking tool needed
+2. Modify values or duplicate existing entries to create new objects
+3. Save: the editor never writes into `WDFiles`. It asks for a new mod archive
+   in `Mods\` (for example `MyParameters.wd`) that carries only the par, with
+   the directory metadata of the original (flags `0x39`, resource
+   `translateGameParams`, id 1536, same GUID - like the Kira mod ships it).
+   Opening a mod `.wd` and saving swaps the par inside it and keeps every
+   other file; the old archive goes to the tool's backup folder
+   (`%LOCALAPPDATA%\TW1ParEditor\backup`), not into `Mods\`.
+4. Start the game. The Mod Manager shows and toggles the mod.
 
 **Adding new objects (e.g. a new road sign):**
 1. Find a similar entry (e.g. `ROADSIGN_L_13`)
@@ -169,6 +178,33 @@ These are **not separate PAR fields** — they are all part of the single `mesh`
 MIT
 
 ## Changelog
+
+### v1.6.0 (18.09.2026)
+
+- **Opens `.wd` archives.** Open `WDFiles\Update16.wd` (or any mod `.wd`)
+  and the editor finds the `TwoWorlds.par` inside. The WDPackager, which
+  crashes on 64-bit Windows, is no longer needed to edit parameters.
+- **Saves as a mod.** A par from a game archive is saved as a new one-file
+  `.wd` in `Mods\`; the game archive is never written. A par from a mod
+  `.wd` is swapped in place, every other file of the archive is copied
+  unchanged, the old archive lands in the tool's backup folder, outside
+  `Mods\`.
+- Works with buglord's
+  [WD Repacker (Python)](https://github.com/buglord/Two-Worlds-1-Misc-Projects/tree/main/WD%20Repacker%20(Python)):
+  a par saved loose keeps the two-stream layout whose first stream is the
+  directory metadata (flags, resource, id, GUID), so `wdio.py pack -v 1`
+  packs it with the right entry, and `wdio.py unpack -p` output opens here.
+- Save As onto an existing `.wd` asks: swap only the par, or replace the
+  whole archive.
+- Fixes from a code review and a functional test run: no more data loss on
+  Open / Close / DE-EN switch with a value still being typed; just viewing
+  an entry no longer changes floats or empty string arrays; empty arrays
+  get an input box; array items are range-checked; renaming to an existing
+  name warns; a JSON import saves through Save As; the detail panel no
+  longer leaks Tcl commands (about 60 per selected entry); nothing is ever
+  written below a game's `WDFiles` folder, loose `.par` included.
+- Compare & Merge reads `.wd` too and can save the merged par as a `.wd`.
+- `--info` and `--export` accept a `.wd`.
 
 ### v1.5.0 (16.09.2026)
 

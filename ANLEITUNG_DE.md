@@ -16,9 +16,13 @@ Der Editor zeigt beim Start in der Statusleiste: **„1808 SDK-Feldnamen, 1699 B
 
 `Datei → Open PAR` (Ctrl+O)
 
-Die `TwoWorlds.par` liegt in den WD-Archiven des Spiels. Zum Entpacken:
-- [TW2WDTool](https://www.moddb.com/games/two-worlds/downloads) oder WDPackager aus dem SDK verwenden
-- Die `.par` ist zlib-komprimiert — der Editor erkennt das automatisch
+`WDFiles\Update16.wd` im Spielordner auswählen. Der Editor findet die
+`TwoWorlds.par` im Archiv - kein Entpacker nötig. Eine lose `TwoWorlds.par`
+geht auch.
+
+Speichern schreibt nie in `WDFiles`: der Editor fragt nach einem Mod-Archiv
+in `Mods\`, zum Beispiel `MeineParameter.wd`. Das Spiel lädt es beim
+nächsten Start.
 
 ## Oberfläche
 

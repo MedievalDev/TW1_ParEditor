@@ -101,41 +101,39 @@ def ch_first():
 
 Ziel: der Wolf haelt doppelt so viel aus, und das Spiel zeigt es.
 
-1. **Die richtige Par holen.** Das Spiel laedt `Parameters\\TwoWorlds.par`
-   aus `WDFiles\\Update16.wd` - nicht aus `Parameters.wd`, die traegt das
-   alte 1.0-Layout (der Editor warnt). Mit dem WD Repacker oder dem Entpacker
-   des TW1 Minimap Tools entpacken.
-2. **Oeffnen** (Strg+O). Die Statusleiste meldet "608 lists matched to SDK
-   sheets".
+1. **Oeffnen** (Strg+O) und `WDFiles\\Update16.wd` im Spielordner waehlen.
+   Der Editor findet `Parameters\\TwoWorlds.par` im Archiv, entpacken ist
+   nicht noetig. Nicht `Parameters.wd` nehmen, die traegt das alte
+   1.0-Layout (der Editor warnt).
+2. Die Statusleiste meldet "608 lists matched to SDK sheets".
 3. **Filtern:** `units wolf` tippen. Es bleiben 9 Eintraege, die Gruppe
    Gegner ist offen.
 4. `MO_WOLF_01` anklicken, rechts `maxHP` suchen (Feld 6) und `initParamHP`
    (Feld 34). Werte verdoppeln.
-5. **Speichern** (Strg+S). Die alte Datei liegt jetzt in `_backup\\` daneben.
-6. **Als Mod packen:** die Par als `Parameters\\TwoWorlds.par` in ein
-   WD-Archiv, Verzeichnisflags 0x39, Datei nach `Mods\\`, in der Registry
-   unter `HKCU\\SOFTWARE\\Reality Pump\\TwoWorlds\\Mods` auf 1 setzen.
+5. **Speichern** (Strg+S). Weil die Par aus dem Spielarchiv kommt, fragt der
+   Editor nach einem Namen im Ordner `Mods\\`, zum Beispiel
+   `MeineParameter.wd`. `Update16.wd` bleibt unberuehrt.
+6. Die Mod laedt beim naechsten Spielstart. Im Mod Manager kann man sie
+   ein- und ausschalten.
 7. Neues Spiel starten und einen Wolf suchen.
-
-Was der Editor nicht macht: die Par direkt aus dem Spiel lesen oder als Mod
-packen. Das kommt in einer spaeteren Version.
 ''', '''# First result in 10 minutes
 
 Goal: the wolf takes twice the punishment, and the game shows it.
 
-1. **Get the right par.** The game loads `Parameters\\TwoWorlds.par` from
-   `WDFiles\\Update16.wd` - not from `Parameters.wd`, which carries the old
-   1.0 layout (the editor warns). Unpack it with the WD Repacker or the
-   unpacker of the TW1 Minimap Tool.
-2. **Open** (Ctrl+O). The status bar says "608 lists matched to SDK sheets".
+1. **Open** (Ctrl+O) and pick `WDFiles\\Update16.wd` in the game folder. The
+   editor finds `Parameters\\TwoWorlds.par` inside the archive, no unpacking
+   needed. Do not take `Parameters.wd`, it carries the old 1.0 layout (the
+   editor warns).
+2. The status bar says "608 lists matched to SDK sheets".
 3. **Filter:** type `units wolf`. 9 entries remain, the Enemies group is
    open.
 4. Click `MO_WOLF_01`, find `maxHP` on the right (field 6) and `initParamHP`
    (field 34). Double both.
-5. **Save** (Ctrl+S). The old file now sits in `_backup\\` next to it.
-6. **Pack it as a mod:** the par as `Parameters\\TwoWorlds.par` inside a WD
-   archive, directory flags 0x39, the file into `Mods\\`, set to 1 under
-   `HKCU\\SOFTWARE\\Reality Pump\\TwoWorlds\\Mods`.
+5. **Save** (Ctrl+S). Because the par came from the game archive, the editor
+   asks for a name in the `Mods\\` folder, for example `MyParameters.wd`.
+   `Update16.wd` stays untouched.
+6. The mod loads at the next game start. The Mod Manager switches it on and
+   off.
 7. Start a new game and find a wolf.
 
 What the editor does not do: read the par straight from the game or pack it
@@ -322,37 +320,55 @@ rows missing from Input. Merge can be undone (Ctrl+Z in the Editor tab).
 def ch_mod():
     return _l('''# In eine Mod packen
 
-Der Editor schreibt eine `.par`. Das Spiel liest sie erst, wenn sie in
-einem WD-Archiv im Ordner `Mods\\` liegt und dort eingeschaltet ist.
+Das Spiel liest eine geaenderte Par nur aus einem WD-Archiv im Ordner
+`Mods\\`. Der Editor schreibt dieses Archiv selbst.
 
-1. Ordner anlegen: `MeineMod\\Parameters\\TwoWorlds.par`.
-2. Mit dem WD Repacker packen. Der Verzeichniseintrag der Par braucht die
-   Flags `0x39` wie im Retail-Archiv (gemessen an `Parameters.wd`); der
-   Repacker setzt sie fuer eine zlib-gepackte Datei.
-3. `MeineMod.wd` nach `<Spiel>\\Mods\\`.
-4. Einschalten: Registry `HKCU\\SOFTWARE\\Reality Pump\\TwoWorlds\\Mods`,
-   Wert `MeineMod.wd` = 1 (DWORD), oder im "TwoWorlds1 Mod Selector".
-5. Das Spiel liest die Mod-Liste nur beim Start.
+| Geoeffnet | Speichern (Strg+S) |
+|---|---|
+| `WDFiles\\Update16.wd` (Spielarchiv) | fragt nach einer neuen `.wd` in `Mods\\`; das Spielarchiv wird nie beschrieben |
+| eine Mod-`.wd` | tauscht die Par in diesem Archiv aus, alle anderen Dateien bleiben; die alte Fassung kommt in den Sicherungsordner des Tools (nicht nach `Mods\\`, dort koennte das Spiel sie als Mod laden) |
+| eine lose `.par` | schreibt die `.par`; mit Speichern unter und Typ `.wd` entsteht eine Mod |
 
-Spaeter geladene Archive gewinnen: liegt eine zweite Mod mit eigener Par
-daneben, gilt die, die das Spiel zuletzt laedt.
+Quelle: tw1_par_editor.py, _save / _save_as / write_par_target
+
+Der Verzeichniseintrag der Par bekommt dieselben Werte wie das Original:
+Pfad `Parameters\\TwoWorlds.par`, Flags `0x39`, Ressource
+`translateGameParams`, Id 1536 und dieselbe GUID. So liefert auch die
+Kira-Mod ihre Par aus, und Spielstaende behalten ihren Par-Fingerabdruck.
+
+Die Mod laedt beim naechsten Start. Ein Registry-Wert
+`HKCU\\SOFTWARE\\Reality Pump\\TwoWorlds\\Mods` = 0 schaltet sie aus, der Mod
+Manager zeigt und schaltet das.
+
+Nur eine Mod mit eigener Par gleichzeitig einschalten: welche gewinnt,
+haengt von der Ladereihenfolge ab und ist nicht vermessen.
 ''', '''# Packing into a mod
 
-The editor writes a `.par`. The game reads it only once it sits inside a WD
-archive in the `Mods\\` folder and is switched on there.
+The game reads a changed par only from a WD archive in the `Mods\\` folder.
+The editor writes that archive itself.
 
-1. Make a folder: `MyMod\\Parameters\\TwoWorlds.par`.
-2. Pack it with the WD Repacker. The directory entry of the par needs flags
-   `0x39` like in the retail archive (measured on `Parameters.wd`); the
-   repacker sets them for a zlib-packed file.
-3. `MyMod.wd` into `<game>\\Mods\\`.
-4. Switch it on: registry `HKCU\\SOFTWARE\\Reality Pump\\TwoWorlds\\Mods`,
-   value `MyMod.wd` = 1 (DWORD), or use the "TwoWorlds1 Mod Selector".
-5. The game reads the mod list only at startup.
+| Opened | Save (Ctrl+S) |
+|---|---|
+| `WDFiles\\Update16.wd` (game archive) | asks for a new `.wd` in `Mods\\`; the game archive is never written |
+| a mod `.wd` | swaps the par inside that archive, every other file stays; the old version goes to the tool's backup folder (not into `Mods\\`, where the game might load it as a mod) |
+| a loose `.par` | writes the `.par`; Save As with type `.wd` makes a mod |
 
-Later archives win: with a second mod that carries its own par, the one the
-game loads last applies.
-''')
+Source: tw1_par_editor.py, _save / _save_as / write_par_target
+
+The directory entry of the par gets the values of the original: path
+`Parameters\\TwoWorlds.par`, flags `0x39`, resource `translateGameParams`,
+id 1536 and the same GUID. The Kira mod ships its par the same way, and
+savegames keep their par fingerprint.
+
+The mod loads at the next start. A registry value under
+`HKCU\\SOFTWARE\\Reality Pump\\TwoWorlds\\Mods` = 0 switches it off; the Mod
+Manager shows and toggles that.
+
+Switch on only one mod with its own par at a time: which one wins depends on
+the load order, which is not measured.
+''') + '\n' + _source('tw1_par_editor.py, write_par_target / wd_new_with_par / wd_replace_par; '
+                      + _l('Metadaten gemessen an Update16.wd, Yamalin.wd, Elite.wd, revamp.wd',
+                           'metadata measured on Update16.wd, Yamalin.wd, Elite.wd, revamp.wd'))
 
 
 def ch_reference():

@@ -14,11 +14,14 @@ The editor shows on startup: **"1808 SDK field names, 1699 descriptions loaded"*
 
 ## Opening a PAR File
 
-`File → Open PAR` (Ctrl+O)
+`File → Open` (Ctrl+O)
 
-The `TwoWorlds.par` is inside the game's WD archives. To extract:
-- Use [TW2WDTool](https://www.moddb.com/games/two-worlds/downloads) or WDPackager from the SDK
-- The `.par` is zlib-compressed — the editor handles this automatically
+Pick `WDFiles\Update16.wd` in the game folder. The editor finds the
+`TwoWorlds.par` inside the archive - no unpacking tool needed. A loose
+`TwoWorlds.par` opens too.
+
+Saving never writes into `WDFiles`: the editor asks for a mod archive in
+`Mods\`, for example `MyParameters.wd`. The game loads it at the next start.
 
 ## Interface
 
