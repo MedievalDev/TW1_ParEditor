@@ -10,6 +10,7 @@ py -3.13 -m PyInstaller --noconfirm --onefile --windowed ^
   --add-data "%~dp0untested.json;." ^
   --hidden-import theme --hidden-import guidebook --hidden-import updater --hidden-import version --hidden-import categories ^
   --hidden-import bulktools --hidden-import bulkui --hidden-import dropfiles ^
+  --hidden-import worktools --hidden-import extraui ^
   --hidden-import foxfeedback --hidden-import foxfeedback_ui ^
   --distpath "%~dp0dist" --workpath "%TEMP%\par_editor_build" --specpath "%TEMP%\par_editor_build" tw1_par_editor.py
 set rc=%errorlevel%

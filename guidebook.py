@@ -611,6 +611,120 @@ Dragging a `.par`, a `.wd` or a JSON export from Explorer onto the window
 opens it like File > Open.
 """)
 
+
+def ch_work():
+    return _l("""# Schneller arbeiten
+
+## Was sich geaendert hat
+
+Ein Eintrag, der sich seit dem Oeffnen geaendert hat, traegt im Baum einen
+**blauen Punkt**, seine Liste auch. Rechts steht die Nummer eines geaenderten
+Felds in Blau, daneben klein **war 80** - der Wert beim Oeffnen.
+**Nur geaenderte** in der Werkzeugleiste (oder Ansicht > Nur geaenderte
+Eintraege) blendet alles andere aus. Nach dem Speichern beginnen die
+Markierungen von vorn.
+
+## Die Werte des Spiels
+
+Ist eine Mod-Par offen, liest der Editor im Hintergrund die Par des Spiels
+(`WDFiles\\Update16.wd`, gesucht ueber dem geoeffneten Ordner und in den
+ueblichen Steam-Ordnern). Weicht ein Feld davon ab, steht daneben klein
+**Spiel 100**. Rechtsklick auf den Feldnamen > **Auf den Wert des Spiels
+zuruecksetzen**, Rechtsklick auf einen Eintrag > **auf die Werte des Spiels
+zuruecksetzen** (alle Felder). Ansicht > Par des Spiels festlegen... waehlt
+die Datei von Hand, Ansicht > Werte des Spiels zeigen schaltet es ab.
+
+## Favoriten
+
+Rechtsklick auf einen Eintrag > **Zu den Favoriten**: er steht oben im Baum
+in der Gruppe Favoriten, auch nach dem naechsten Oeffnen. Gemerkt wird der
+Name.
+
+## Vorlagen fuer neue Eintraege
+
+Rechtsklick auf einen Eintrag > **Als Vorlage speichern...** merkt sich alle
+Felder, dateiuebergreifend. Rechtsklick auf eine Liste desselben Blatts >
+**Neuer Eintrag aus Vorlage**: der Name ist schon der naechste freie
+(`MO_WOLF_01` -> `MO_WOLF_05`, wenn 02 bis 04 vergeben sind), Textfelder mit
+dem alten Namen (Mesh-Pfade) bekommen den neuen. Duplizieren schlaegt jetzt
+ebenfalls den naechsten freien Namen vor.
+
+## Tabelle (CSV) fuer Excel und LibreOffice
+
+Rechtsklick auf eine Kategorie oder Liste > **als Tabelle exportieren**, oder
+Datei > Tabelle exportieren (die Auswahl oder die aktuelle Liste). Eine Zeile
+je Eintrag, eine Spalte je Feldname, Trennzeichen Semikolon, Felder von
+Listen mit ` | ` getrennt. Bearbeiten, speichern, dann Datei > **Tabelle
+importieren**: das Pruef-Fenster zeigt jede Aenderung, Haken weg laesst ein
+Feld, wie es ist. Leere Zellen werden uebersprungen, Punkt und Komma gehen
+als Dezimalzeichen. Strg+Z nimmt den ganzen Import zurueck.
+
+## Zu Eintrag springen
+
+**Strg+P** oeffnet ein kleines Fenster: einen Teil des Namens tippen, mit den
+Pfeiltasten waehlen, Enter springt hin. Genaue Namen stehen oben.
+
+## Schneller Wechsel
+
+Eintraege mit demselben Aufbau (gleiches Blatt) benutzen die Zeilen des
+vorigen weiter, nur die Werte wechseln: ein Klick braucht rund 0,03 s statt
+0,8 s. Die Bildlaufposition bleibt, so sieht man dasselbe Feld beim naechsten
+Gegner an derselben Stelle.
+""", """# Working faster
+
+## What changed
+
+An entry that changed since opening carries a **blue dot** in the tree, and
+so does its list. On the right the number of a changed field turns blue, with
+a small **was 80** next to it - the value when opened. **Changed only** in the
+toolbar (or View > Changed entries only) hides everything else. After saving
+the marks start from there.
+
+## The game's values
+
+With a mod par open, the editor reads the game's par in the background
+(`WDFiles\\Update16.wd`, looked for above the opened folder and in the usual
+Steam folders). Where a field differs, a small **game 100** stands next to it.
+Right-click the field name > **Reset to the game's value**, right-click an
+entry > **Reset to the game's values** (every field). View > Set the game's
+par... picks the file by hand, View > Show the game's values switches it off.
+
+## Favourites
+
+Right-click an entry > **Add to favourites**: it sits at the top of the tree
+in the group Favourites, also the next time you open a par. The name is what
+is kept.
+
+## Templates for new entries
+
+Right-click an entry > **Save as template...** keeps all its fields, across
+files. Right-click a list of the same sheet > **New entry from template**:
+the name is already the next free one (`MO_WOLF_01` -> `MO_WOLF_05` when 02 to
+04 are taken), text fields with the old name (mesh paths) get the new one.
+Duplicate now suggests the next free name too.
+
+## Table (CSV) for Excel and LibreOffice
+
+Right-click a category or a list > **Export ... as table**, or File > Export
+table (the selection or the current list). One row per entry, one column per
+field name, semicolon as separator, array items split by ` | `. Edit, save,
+then File > **Import table**: the review window shows every change, untick to
+leave a field as it is. Empty cells are skipped, point and comma both work as
+decimal sign. Ctrl+Z undoes the whole import.
+
+## Jump to an entry
+
+**Ctrl+P** opens a small window: type part of the name, pick with the arrow
+keys, Enter jumps there. Exact names come first.
+
+## Quick switching
+
+Entries with the same layout (same sheet) reuse the rows of the one before,
+only the values change: a click takes about 0.03 s instead of 0.8 s. The
+scroll position stays, so the same field of the next enemy is in the same
+place.
+""") + '\n' + _source('worktools.py, extraui.py, ParEditorApp._show_entry / _build_rows')
+
 CHAPTERS = (
     ('start', ('Einstieg', 'Getting started'), ch_start),
     ('first', ('Erstes Ergebnis in 10 Minuten', 'First result in 10 minutes'), ch_first),
@@ -618,6 +732,7 @@ CHAPTERS = (
     ('fields', ('Felder bearbeiten', 'Editing fields'), ch_fields),
     ('bulk', ('Massenbearbeitung und Vorlagen', 'Bulk edit and presets'), ch_bulk),
     ('review', ('Pruefen und Verweise', 'Review and references'), ch_review),
+    ('work', ('Schneller arbeiten', 'Working faster'), ch_work),
     ('compare', ('Vergleichen und Zusammenfuehren', 'Compare & Merge'), ch_compare),
     ('mod', ('In eine Mod packen', 'Packing into a mod'), ch_mod),
     ('reference', ('Referenztabellen', 'Reference tables'), ch_reference),

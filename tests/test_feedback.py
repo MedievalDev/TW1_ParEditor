@@ -21,7 +21,7 @@ import foxfeedback  # noqa: E402
 import foxfeedback_ui  # noqa: E402
 
 TOOL = 'pareditor'                # the slug the server knows
-VERSION = '1.7.1'                # the tool's version constant
+VERSION = '1.8.0'                # the tool's version constant
 UNTESTED = os.path.join(ROOT, 'untested.json')
 
 

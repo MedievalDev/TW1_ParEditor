@@ -125,6 +125,20 @@ fuer Massenbearbeitung ruft sie wieder auf.
 - Eine `.par`, `.wd` oder `.json` aus dem Explorer aufs Fenster ziehen
   oeffnet sie.
 
+## Schneller arbeiten (v1.8)
+
+- Blauer Punkt = Eintrag seit dem Oeffnen geaendert, blaue Feldnummer = Feld
+  geaendert, "war 80" = Wert beim Oeffnen. **Nur geaenderte** in der
+  Werkzeugleiste filtert.
+- Bei einer offenen Mod zeigt "Spiel 100" den Wert aus `Update16.wd`.
+  Rechtsklick auf den Feldnamen setzt ihn zurueck, Rechtsklick auf einen
+  Eintrag alle seine Felder.
+- Rechtsklick auf einen Eintrag > Zu den Favoriten / Als Vorlage speichern.
+  Rechtsklick auf eine Liste > Neuer Eintrag aus Vorlage.
+- Datei > Tabelle exportieren (CSV) / Tabelle importieren (CSV); Rechtsklick
+  auf eine Liste oder Kategorie exportiert nur diese.
+- Strg+P: per Name zu einem Eintrag springen.
+
 ## Compare & Merge (PAR-Dateien vergleichen und zusammenführen)
 
 Der "Compare & Merge"-Tab ermöglicht es, zwei PAR-Dateien Feld für Feld zu vergleichen und Änderungen selektiv zu übernehmen.

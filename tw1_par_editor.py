@@ -11,6 +11,7 @@ import json
 import io
 import zlib
 import copy
+import csv
 import time
 from pathlib import Path
 from collections import OrderedDict
@@ -31,6 +32,7 @@ if HAS_TK:
     import guidebook                   # Help > Guide (F1), ?-marks
 import updater                         # update check + self-update from GitHub
 import bulktools as BT                 # bulk edit, review, references (1.7.0)
+import worktools as WT                 # marks, game values, csv, templates, jump box (1.8.0)
 from version import VERSION
 from categories import CATEGORIES, SHEET_CATEGORY, NPC_PREFIXES, category_of   # noqa: F401
 
@@ -1401,6 +1403,14 @@ class ParEditorApp:
         self.update_var = tk.BooleanVar(value=bool(self.cfg.get('update_check', True)))
         self.review_var = tk.BooleanVar(value=bool(self.cfg.get('review_before_save', True)))
         self.orig = None                    # the par as opened - for the review before saving
+        # 1.8.0: marks against the par as opened, the game's values, reused rows
+        self.changed_only_var = tk.BooleanVar(value=False)
+        self.game_var = tk.BooleanVar(value=bool(self.cfg.get('show_game_values', True)))
+        self.game_ref = None                # WT.RefIndex of the game's par
+        self._game_result = None
+        self._changed = {}                  # (li, ei) -> set of field numbers / None = new entry
+        self._orig_idx = {}                 # li -> {name: entry} of self.orig
+        self._pool = None                   # detail rows of the last layout, reused
         self._init_feedback()
         self._setup_theme()
         self._build_ui()
@@ -1742,6 +1752,10 @@ class ParEditorApp:
         m.add_separator()
         m.add_command(label=tr("Export JSON..."), accelerator="Ctrl+E", command=self._export_json,
                       state='normal' if self.par else 'disabled')
+        m.add_command(label=tr("Export table (CSV)..."), command=lambda: self.export_csv(),
+                      state='normal' if self.par else 'disabled')
+        m.add_command(label=tr("Import table (CSV)..."), command=self.import_csv,
+                      state='normal' if self.par else 'disabled')
         m.add_separator()
         m.add_command(label=tr("Restore backup..."), command=self._restore_backup,
                       state='normal' if self.par else 'disabled')
@@ -1779,6 +1793,18 @@ class ParEditorApp:
         m.add_separator()
         m.add_command(label=tr("Find references to this entry"), accelerator="Ctrl+R",
                       command=lambda: self.find_references(li, ei), state='normal' if has else 'disabled')
+        m.add_command(label=tr("Jump to entry..."), accelerator="Ctrl+P", command=self.quick_jump,
+                      state='normal' if self.par else 'disabled')
+        m.add_separator()
+        m.add_command(label=tr("Save entry as template..."), command=lambda: self.save_template(li, ei),
+                      state='normal' if has else 'disabled')
+        tsub = theme.Menu(m)
+        temps = self.templates()
+        for name in sorted(temps):
+            tsub.add_command(label=tr("Delete template '{n}'").format(n=name), command=lambda n=name: self.delete_template(n))
+        if not temps:
+            tsub.add_command(label=tr("(none yet - right-click an entry)"), state='disabled')
+        m.add_cascade(label=tr("Entry templates"), menu=tsub)
         m.add_separator()
         m.add_command(label=tr("Filter"), accelerator="Ctrl+F",
                       command=lambda: self.search_entry.focus_set())
@@ -1789,6 +1815,10 @@ class ParEditorApp:
     def _fill_view(self, m):
         m.add_command(label=tr("Editor"), command=lambda: self.notebook.select(0))
         m.add_command(label=tr("Compare & Merge"), command=lambda: self.notebook.select(1))
+        m.add_separator()
+        m.add_checkbutton(label=tr("Changed entries only"), variable=self.changed_only_var, command=self._apply_filter)
+        m.add_checkbutton(label=tr("Show the game's values"), variable=self.game_var, command=self._toggle_game)
+        m.add_command(label=tr("Set the game's par..."), command=self._pick_game_par)
         m.add_separator()
         sub = theme.Menu(m)
         for code, name in (('de', 'Deutsch'), ('en', 'English')):
@@ -1917,6 +1947,11 @@ class ParEditorApp:
         self.search_label = ttk.Label(toolbar, text="", style='Dim.TLabel')
         self.search_label.pack(side='left', padx=(4, 0))
         help_mark(toolbar, tr("Type to keep only matching entries: name, sheet or text field. Several words must all match. Click for the guide."), 'filter', self)
+        cb = ttk.Checkbutton(toolbar, text=tr("Changed only"), variable=self.changed_only_var,
+                             command=self._apply_filter)
+        cb.pack(side='left', padx=(12, 0))
+        ToolTip(cb, tr("Show only entries that differ from the file as it was opened.\n"
+                       "Changed entries carry a blue dot in the tree, changed fields a blue number."))
         placeholder(self.search_entry, self.search_var, tr("wolf, traps, units wolf ..."))
         ToolTip(self.search_entry, tr(
                 "Type to filter the tree: entry name, sheet (Units, Weapon, Traps ...)\n"
@@ -1970,6 +2005,8 @@ class ParEditorApp:
         self.tree.pack(side='left', fill='both', expand=True)
         tree_scroll.pack(side='right', fill='y')
 
+        self.tree.tag_configure('changed', foreground=theme.MOD)
+        self.tree.tag_configure('fav', foreground=theme.GOLD)
         self.tree.bind('<<TreeviewSelect>>', self._on_tree_select)
         self.tree.bind('<Button-3>', self._tree_context_menu)
 
@@ -2038,6 +2075,7 @@ class ParEditorApp:
         self.root.bind('<F3>', lambda e: self._search_next())
         self.root.bind('<F1>', lambda e: self.show_guide())
         self.root.bind('<Control-b>', self._key(lambda: self.bulk_edit()))
+        self.root.bind('<Control-p>', lambda e: (self.quick_jump(), 'break')[1])
         self.root.bind('<Control-r>', self._key(lambda: self.find_references(self.current_li, self.current_ei)))
         self.root.bind('<Control-z>', self._key(self.do_undo))
         self.root.bind('<Control-y>', self._key(self.do_redo))
@@ -2097,9 +2135,12 @@ class ParEditorApp:
             self.redo_stack.clear()
             self.field_labels.resolve(self.par)
             self.orig = copy.deepcopy(self.par)
+            self._orig_idx = {}
+            self._drop_pool()
             self.empty_box.place_forget()
             self._populate_tree()
             self._update_title()
+            self._load_game_ref()
 
             total_entries = sum(len(pl.entries) for pl in self.par.lists)
             comp_str = "  [zlib]" if was_compressed else ""
@@ -2155,9 +2196,12 @@ class ParEditorApp:
             self.redo_stack.clear()
             self.field_labels.resolve(self.par)
             self.orig = copy.deepcopy(self.par)
+            self._orig_idx = {}
+            self._drop_pool()
             self.empty_box.place_forget()
             self._populate_tree()
             self._update_title()
+            self._load_game_ref()
 
             total_entries = sum(len(pl.entries) for pl in self.par.lists)
             self.file_label.configure(
@@ -2275,7 +2319,9 @@ class ParEditorApp:
             self.par.filepath = path
             self.modified = False
             self.orig = copy.deepcopy(self.par)
+            self._orig_idx = {}
             self._update_title()
+            self._refresh_after_change()          # the marks start again from here
             bak_str = f"  |  backup: _backup\\{os.path.basename(backup)}" if backup else ""
             hint = tr("  |  the game loads it at the next start; switch it in the Mod Manager") if what == 'wd' else ''
             self._set_status(f"Saved {Path(path).name} ({size} bytes{' (zlib)' if what == 'zlib' else ''}){bak_str}{hint}")
@@ -2355,6 +2401,10 @@ class ParEditorApp:
         self._last_query = ' '.join(terms)
         shown = 0
         sheets = getattr(self.par, 'sheets', None) or [None] * len(self.par.lists)
+        self._changed = WT.changed_map(self.orig, self.par)
+        only_changed = bool(self.changed_only_var.get())
+        narrowing = bool(terms) or only_changed
+        self._fill_favorites()
 
         # Category nodes first, in fixed order; lists hang below them.
         want = self.cat_var.get()
@@ -2365,7 +2415,7 @@ class ParEditorApp:
             if only and c != only:
                 continue
             cat_nodes[c] = self.tree.insert('', 'end', iid=f"C{CATEGORIES.index(c)}",
-                                            text=f"  {tr(c)}", open=bool(only or terms))
+                                            text=f"  {tr(c)}", open=bool(only or narrowing))
 
         for li, pl in enumerate(self.par.lists):
             sheet = sheets[li] if li < len(sheets) else None
@@ -2373,8 +2423,9 @@ class ParEditorApp:
             if cat not in cat_nodes:
                 continue
             entries = [(ei, e) for ei, e in enumerate(pl.entries)
-                       if not terms or self._entry_matches(e, sheet, terms)]
-            if terms and not entries:
+                       if (not terms or self._entry_matches(e, sheet, terms))
+                       and (not only_changed or (li, ei) in self._changed)]
+            if narrowing and not entries:
                 continue
             cat_count[cat] += len(entries)
 
@@ -2387,47 +2438,31 @@ class ParEditorApp:
                 list_label = f"{head}  ({pl.entries[0].name})"
             else:
                 first = pl.entries[0].name
-                shown_str = f"{len(entries)} of {entry_count}" if terms else f"{entry_count}"
+                shown_str = f"{len(entries)} of {entry_count}" if narrowing else f"{entry_count}"
                 list_label = f"{head}  ({first}...)  [{shown_str}]"
 
+            list_changed = any((li, ei) in self._changed for ei in range(entry_count))
             list_id = self.tree.insert(cat_nodes[cat], 'end', iid=f"L{li}",
-                                        text=f"  {list_label}",
-                                        open=bool(terms))
+                                        text=("\u25CF " if list_changed else "  ") + list_label,
+                                        open=bool(narrowing), tags=('changed',) if list_changed else ())
 
             # Entry nodes
             for ei, entry in entries:
-                field_count = len(entry.fields)
-                if terms:
+                if narrowing:
                     self.search_results.append((li, ei))
                 shown += 1
-                # Find best preview: prefer first string field, else first value
-                preview = ""
-                for f in entry.fields[:5]:
-                    if f.dtype == TYPE_STRING and f.value:
-                        s = str(f.value)
-                        if len(s) > 35:
-                            s = s[-32:] 
-                            preview = f"...{s}"
-                        else:
-                            preview = s
-                        break
-                if not preview and field_count > 0:
-                    preview = self._field_preview(entry.fields[0])
-
-                entry_text = f"  {entry.name}"
-                if preview:
-                    entry_text = f"  {entry.name}  \u2502 {preview}"
-
+                ch = (li, ei) in self._changed
                 self.tree.insert(list_id, 'end',
                                   iid=f"L{li}E{ei}",
-                                  text=entry_text)
+                                  text=self._entry_text(entry, ch),
+                                  tags=('changed',) if ch else ())
 
         for c, node in cat_nodes.items():
-            if terms and not cat_count[c]:
+            if narrowing and not cat_count[c]:
                 self.tree.delete(node)
             else:
                 self.tree.item(node, text=f"  {tr(c)}  [{cat_count[c]}]")
-        if terms:
+        if narrowing:
             self.search_label.configure(text=tr("{n} entries").format(n=shown))
         else:
             self.search_label.configure(text="")
@@ -2437,6 +2472,47 @@ class ParEditorApp:
             if self.tree.exists(iid):
                 self._open_list(f"L{li}")
                 self._select_iid(iid)
+
+    def _entry_text(self, entry, changed=False):
+        """Tree text of an entry: name and a preview (first text field, else
+        the first value); a blue dot in front when it differs from the file
+        as opened."""
+        preview = ""
+        for f in entry.fields[:5]:
+            if f.dtype == TYPE_STRING and f.value:
+                s = str(f.value)
+                preview = f"...{s[-32:]}" if len(s) > 35 else s
+                break
+        if not preview and entry.fields:
+            preview = self._field_preview(entry.fields[0])
+        text = f"{entry.name}  \u2502 {preview}" if preview else entry.name
+        return ("\u25CF " if changed else "  ") + text
+
+    def _fill_favorites(self):
+        """Pinned entries in their own group at the top (1.8.0)."""
+        favs = [n for n in self.cfg.get('favorites') or [] if isinstance(n, str)]
+        if not favs or not self.par:
+            return
+        where = {}
+        for li, pl in enumerate(self.par.lists):
+            for ei, e in enumerate(pl.entries):
+                where.setdefault(e.name, (li, ei))
+        found = [(n, where[n]) for n in favs if n in where]
+        node = self.tree.insert('', 'end', iid='FAV', open=True,
+                                text=f"  \u2605 {tr('Favourites')}  [{len(found)}]", tags=('fav',))
+        for name, (li, ei) in found:
+            ch = (li, ei) in self._changed
+            self.tree.insert(node, 'end', iid=f"F{li}E{ei}",
+                             text=self._entry_text(self.par.lists[li].entries[ei], ch),
+                             tags=('changed',) if ch else ())
+
+    @staticmethod
+    def _iid_entry(iid):
+        """(li, ei) of a tree row that is an entry (L..E.. or a favourite F..E..)."""
+        if iid and iid[0] in 'LF' and 'E' in iid:
+            a, b = iid[1:].split('E')
+            return int(a), int(b)
+        return None
 
     def _open_list(self, list_iid):
         """Expand a list node and the category above it."""
@@ -2473,16 +2549,16 @@ class ParEditorApp:
         focus = self.tree.focus()
         item_id = focus if focus in sel else sel[-1]
 
-        # Parse item ID (C = category, L = list, L..E.. = entry)
-        if item_id.startswith('C'):
+        # Parse item ID (C = category, FAV = favourites, L = list, L..E../F..E.. = entry)
+        if item_id.startswith('C') or item_id == 'FAV':
             self._apply_current_edits()
             self._clear_detail()
             return
-        if item_id.startswith('L') and 'E' in item_id:
-            # Entry node: L{li}E{ei}
-            parts = item_id[1:].split('E')
-            li = int(parts[0])
-            ei = int(parts[1])
+        hit = self._iid_entry(item_id)
+        if hit:
+            li, ei = hit
+            if self.current_entry is not None and (li, ei) == (self.current_li, self.current_ei):
+                return                      # the same entry again (favourite and list row)
             self._apply_current_edits()
             self._show_entry(li, ei)
         elif item_id.startswith('L'):
@@ -2510,8 +2586,14 @@ class ParEditorApp:
         self.edit_widgets = []
 
     def _show_entry(self, li, ei):
-        """Show entry details in the right panel with editable fields."""
-        self._clear_detail()
+        """Show entry details in the right panel with editable fields.
+
+        Entries with the same layout (sheet and field types) reuse the rows of
+        the last one - only the values change, and the rows stay on screen.
+        Building ~65 rows and laying them out took 0.8 s per click, hiding and
+        showing them again 0.35 s; filling them in takes 0.03 s.
+        """
+        self._clear_detail(keep_rows=True)
 
         if not self.par or li >= len(self.par.lists):
             return
@@ -2523,7 +2605,6 @@ class ParEditorApp:
         self.current_entry = entry
         self.current_li = li
         self.current_ei = ei
-        self.edit_widgets = []
 
         field_count = len(entry.fields)
         sheet = FieldLabels.sheet_of(self.par, li)
@@ -2538,134 +2619,185 @@ class ParEditorApp:
         self.detail_info.configure(text=info)
         self._invalid = {}
 
-        # rows are built in a frame that is not mapped yet and shown in one go:
-        # Tk then lays the panel out once instead of after every row
-        parent = tk.Frame(self.detail_inner, bg=self.BG2)
-
-        for fi, field in enumerate(entry.fields):
-            row = tk.Frame(parent, bg=self.BG2)
-            row.pack(fill='x', padx=8, pady=2)
-
-            # Field index, label, and type
-            type_name = TYPE_NAMES.get(field.dtype, f"?{field.dtype}")
-            label_name = self.field_labels.get(sheet, fi)
-
-            header_frame = tk.Frame(row, bg=self.BG2)
-            header_frame.pack(fill='x')
-
-            idx_label = tk.Label(header_frame, text=f"[{fi}]",
-                                  bg=self.BG2, fg=theme.DIM,
-                                  font=('Consolas', 9), width=5, anchor='e')
-            idx_label.pack(side='left')
-
-            # Show label if available
-            if label_name:
-                name_label = tk.Label(header_frame, text=label_name,
-                                       bg=self.BG2, fg=theme.GOLD,
-                                       font=('Consolas', 10, 'bold'),
-                                       anchor='w')
-                name_label.pack(side='left', padx=(4, 4))
-                # Right-click to rename
-                name_label.bind('<Button-3>',
-                    lambda e, sh=sheet, fidx=fi: self._label_context(e, sh, fidx))
-                # Tooltip with German description
-                tip_text = self.field_descs.get(label_name)
-                if tip_text:
-                    ToolTip(name_label, f"{label_name}\n{tip_text}")
-            else:
-                # Clickable placeholder to add label
-                name_label = tk.Label(header_frame, text="···",
-                                       bg=self.BG2, fg=theme.DIM,
-                                       font=('Consolas', 9),
-                                       cursor='hand2', anchor='w')
-                name_label.pack(side='left', padx=(4, 4))
-                name_label.bind('<Button-1>',
-                    lambda e, sh=sheet, fidx=fi: self._add_label(sh, fidx))
-                name_label.bind('<Button-3>',
-                    lambda e, sh=sheet, fidx=fi: self._label_context(e, sh, fidx))
-
-            type_label = tk.Label(header_frame, text=type_name,
-                                   bg=self.BG2, fg=self.PURPLE,
-                                   font=('Consolas', 10), width=10, anchor='w')
-            type_label.pack(side='left', padx=(0, 8))
-
-            # Value widget
-            if field.dtype in (TYPE_INT32, TYPE_UINT32):
-                var = tk.StringVar(value=str(field.value))
-                w = tk.Entry(header_frame, textvariable=var, bg=self.BG4,
-                             fg=self.GREEN, font=('Consolas', 10),
-                             insertbackground=self.FG, relief='flat',
-                             highlightthickness=1,
-                             highlightcolor=self.ACCENT,
-                             highlightbackground=self.BG3)
-                w.pack(side='left', fill='x', expand=True, ipady=2)
-                self._watch_input(var, w, field.dtype, label_name or f"[{fi}]")
-                self.edit_widgets.append((fi, field.dtype, var))
-
-            elif field.dtype == TYPE_FLOAT32:
-                var = tk.StringVar(value=f"{field.value:.6f}")
-                w = tk.Entry(header_frame, textvariable=var, bg=self.BG4,
-                             fg=self.YELLOW, font=('Consolas', 10),
-                             insertbackground=self.FG, relief='flat',
-                             highlightthickness=1,
-                             highlightcolor=self.ACCENT,
-                             highlightbackground=self.BG3)
-                w.pack(side='left', fill='x', expand=True, ipady=2)
-                self._watch_input(var, w, field.dtype, label_name or f"[{fi}]")
-                self.edit_widgets.append((fi, field.dtype, var))
-
-            elif field.dtype == TYPE_STRING:
-                var = tk.StringVar(value=str(field.value))
-                w = tk.Entry(header_frame, textvariable=var, bg=self.BG4,
-                             fg=self.ORANGE, font=('Consolas', 10),
-                             insertbackground=self.FG, relief='flat',
-                             highlightthickness=1,
-                             highlightcolor=self.ACCENT,
-                             highlightbackground=self.BG3)
-                w.pack(side='left', fill='x', expand=True, ipady=2)
-                self.edit_widgets.append((fi, field.dtype, var))
-
-            elif field.dtype in (TYPE_ARRAY_INT32, TYPE_ARRAY_FLOAT,
-                                  TYPE_ARRAY_UINT32, TYPE_ARRAY_STR):
-                arr = field.value if field.value else []
-                arr_label = tk.Label(
-                    header_frame,
-                    text=f"[{len(arr)} items]",
-                    bg=self.BG2, fg=self.BLUE,
-                    font=('Consolas', 10))
-                arr_label.pack(side='left', padx=(0, 8))
-
-                # Show array contents below - also when empty, one item per line
-                if True:
-                    arr_frame = tk.Frame(row, bg=self.BG2)
-                    arr_frame.pack(fill='x', padx=(90, 0))
-
-                    arr_text = tk.Text(arr_frame, bg=self.BG4, fg=self.FG,
-                                        font=('Consolas', 9), relief='flat',
-                                        height=max(1, min(len(arr), 8)),
-                                        insertbackground=self.FG,
-                                        highlightthickness=1,
-                                        highlightcolor=self.ACCENT,
-                                        highlightbackground=self.BG3,
-                                        wrap='none')
-                    for ai, av in enumerate(arr):
-                        if field.dtype == TYPE_ARRAY_FLOAT:
-                            line = f"{av:.6f}"
-                        else:
-                            line = str(av)
-                        arr_text.insert('end', line + ('\n' if ai < len(arr)-1 else ''))
-                    arr_text.pack(fill='x', pady=1)
-                    self.edit_widgets.append((fi, field.dtype, arr_text))
-
-            # Separator line
-            sep = tk.Frame(parent, bg=self.BG3, height=1)
-            sep.pack(fill='x', padx=4, pady=1)
-
-        parent.pack(fill='x')
+        sig = (sheet, tuple(f.dtype for f in entry.fields))
+        if self._pool is None or self._pool['sig'] != sig:
+            self._drop_pool()
+            self._pool = self._build_rows(sheet, entry, sig)
+        self._fill_rows(entry)
+        self.edit_widgets = self._pool['edit']
+        if not self._pool['frame'].winfo_manager():
+            self._pool['frame'].pack(fill='x')
 
         # text as shown: a field is only parsed back when its text changed,
         # so viewing an entry never rewrites floats or string arrays
         self._shown = {fi: self._widget_text(w) for fi, _dt, w in self.edit_widgets}
+
+    def _drop_pool(self):
+        """Throw the reused rows away (other layout, renamed field, new file).
+        The input checks hang on the StringVars; Tcl keeps those callbacks
+        alive until the trace is removed."""
+        pool, self._pool = self._pool, None
+        if pool is None:
+            return
+        for _fi, _dt, var in pool['edit']:
+            if isinstance(var, tk.Variable):
+                try:
+                    for mode, cb in var.trace_info():
+                        var.trace_remove(mode, cb)
+                except tk.TclError:
+                    pass
+        try:
+            pool['frame'].destroy()
+        except tk.TclError:
+            pass
+        if self.edit_widgets is pool['edit']:
+            self.edit_widgets = []
+
+    def _build_rows(self, sheet, entry, sig):
+        """The rows for one layout, empty; _fill_rows puts the values in."""
+        # built in a frame that is not mapped yet and shown in one go: Tk
+        # then lays the panel out once instead of after every row
+        parent = tk.Frame(self.detail_inner, bg=self.BG2)
+        rows, edit = [], []
+        for fi, field in enumerate(entry.fields):
+            row = tk.Frame(parent, bg=self.BG2)
+            row.pack(fill='x', padx=8, pady=2)
+            type_name = TYPE_NAMES.get(field.dtype, f"?{field.dtype}")
+            label_name = self.field_labels.get(sheet, fi)
+            header_frame = tk.Frame(row, bg=self.BG2)
+            header_frame.pack(fill='x')
+
+            idx_label = tk.Label(header_frame, text=f"[{fi}]", bg=self.BG2, fg=theme.DIM,
+                                 font=('Consolas', 9), width=5, anchor='e')
+            idx_label.pack(side='left')
+            idx_label.bind('<Button-3>', lambda e, sh=sheet, fidx=fi: self._label_context(e, sh, fidx))
+
+            if label_name:
+                name_label = tk.Label(header_frame, text=label_name, bg=self.BG2, fg=theme.GOLD,
+                                      font=('Consolas', 10, 'bold'), anchor='w')
+                name_label.pack(side='left', padx=(4, 4))
+                name_label.bind('<Button-3>', lambda e, sh=sheet, fidx=fi: self._label_context(e, sh, fidx))
+                tip_text = self.field_descs.get(label_name)
+                if tip_text:
+                    ToolTip(name_label, f"{label_name}\n{tip_text}")
+            else:
+                name_label = tk.Label(header_frame, text="\u00b7\u00b7\u00b7", bg=self.BG2, fg=theme.DIM,
+                                      font=('Consolas', 9), cursor='hand2', anchor='w')
+                name_label.pack(side='left', padx=(4, 4))
+                name_label.bind('<Button-1>', lambda e, sh=sheet, fidx=fi: self._add_label(sh, fidx))
+                name_label.bind('<Button-3>', lambda e, sh=sheet, fidx=fi: self._label_context(e, sh, fidx))
+
+            tk.Label(header_frame, text=type_name, bg=self.BG2, fg=self.PURPLE,
+                     font=('Consolas', 10), width=10, anchor='w').pack(side='left', padx=(0, 8))
+
+            # "was 80 / game 100" - packed before the value so it keeps its room
+            note = tk.Label(header_frame, text='', bg=self.BG2, fg=theme.MUT, font=('Consolas', 9), anchor='e')
+            r = {'fi': fi, 'dtype': field.dtype, 'idx': idx_label, 'note': note}
+
+            if field.dtype in (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32, TYPE_STRING):
+                note.pack(side='right', padx=(8, 0))
+                colour = {TYPE_INT32: self.GREEN, TYPE_UINT32: self.GREEN,
+                          TYPE_FLOAT32: self.YELLOW, TYPE_STRING: self.ORANGE}[field.dtype]
+                var = tk.StringVar()
+                w = tk.Entry(header_frame, textvariable=var, bg=self.BG4, fg=colour, font=('Consolas', 10),
+                             insertbackground=self.FG, relief='flat', highlightthickness=1,
+                             highlightcolor=self.ACCENT, highlightbackground=self.BG3)
+                w.pack(side='left', fill='x', expand=True, ipady=2)
+                if field.dtype != TYPE_STRING:
+                    self._watch_input(var, w, field.dtype, label_name or f"[{fi}]")
+                r['var'] = var
+                edit.append((fi, field.dtype, var))
+            else:
+                arr_label = tk.Label(header_frame, text='', bg=self.BG2, fg=self.BLUE, font=('Consolas', 10))
+                arr_label.pack(side='left', padx=(0, 8))
+                note.pack(side='left', padx=(8, 0))
+                # array contents below - also when empty, one item per line
+                arr_frame = tk.Frame(row, bg=self.BG2)
+                arr_frame.pack(fill='x', padx=(90, 0))
+                arr_text = tk.Text(arr_frame, bg=self.BG4, fg=self.FG, font=('Consolas', 9), relief='flat',
+                                   height=1, insertbackground=self.FG, highlightthickness=1,
+                                   highlightcolor=self.ACCENT, highlightbackground=self.BG3, wrap='none')
+                arr_text.pack(fill='x', pady=1)
+                r['text'], r['arr_label'] = arr_text, arr_label
+                edit.append((fi, field.dtype, arr_text))
+            rows.append(r)
+
+            tk.Frame(parent, bg=self.BG3, height=1).pack(fill='x', padx=4, pady=1)
+        return {'sig': sig, 'frame': parent, 'rows': rows, 'edit': edit}
+
+    def _fill_rows(self, entry):
+        for r in self._pool['rows']:
+            field = entry.fields[r['fi']]
+            dt = r['dtype']
+            if dt in (TYPE_INT32, TYPE_UINT32, TYPE_STRING):
+                r['var'].set(str(field.value))
+            elif dt == TYPE_FLOAT32:
+                r['var'].set(f"{field.value:.6f}")
+            else:
+                arr = field.value if field.value else []
+                lines = [f"{av:.6f}" if dt == TYPE_ARRAY_FLOAT else str(av) for av in arr]
+                t = r['text']
+                t.delete('1.0', 'end')
+                t.insert('1.0', '\n'.join(lines))
+                t.configure(height=max(1, min(len(arr), 8)))
+                r['arr_label'].configure(text=f"[{len(arr)} items]")
+        self._fill_notes()
+
+    def _orig_entry(self, li, name):
+        """The entry of that name in list li of the file as opened, or None."""
+        if self.orig is None:
+            return None
+        if li not in self._orig_idx:
+            self._orig_idx[li] = WT.orig_index(self.orig, li)
+        return self._orig_idx[li].get(name)
+
+    def _game_ref_on(self):
+        ref = self.game_ref
+        if not ref or not self.game_var.get():
+            return None
+        try:
+            if self.filepath and os.path.samefile(ref.path, self.filepath):
+                return None                 # the open file is the game's par: "was" says it all
+        except OSError:
+            pass
+        return ref
+
+    def _fill_notes(self):
+        """Blue number for a field changed since opening, and small text on the
+        right: the value when opened, the game's value where it differs."""
+        entry, pool = self.current_entry, self._pool
+        if entry is None or pool is None or pool['edit'] is not self.edit_widgets and self.edit_widgets:
+            return
+        before = self._orig_entry(self.current_li, entry.name)
+        changed = WT.changed_fields(entry, before) or set()
+        ref = self._game_ref_on()
+        for r in pool['rows']:
+            fi = r['fi']
+            if fi >= len(entry.fields):
+                continue
+            parts = []
+            is_ch = fi in changed and before is not None and fi < len(before.fields)
+            if is_ch:
+                parts.append(tr("was") + " " + BT.show(before.fields[fi].value, 24))
+            if ref is not None and ref.differs(entry, fi):
+                parts.append(tr("game") + " " + BT.show(ref.value(entry, fi), 24))
+            r['note'].configure(text='   '.join(parts))
+            r['idx'].configure(fg=theme.MOD if is_ch else theme.DIM)
+
+    def _mark_tree_entry(self, li, ei):
+        """Blue dot on the tree row(s) of one entry after an edit."""
+        if not self.par or li >= len(self.par.lists) or ei >= len(self.par.lists[li].entries):
+            return
+        e = self.par.lists[li].entries[ei]
+        ch = WT.changed_fields(e, self._orig_entry(li, e.name))
+        flag = ch is None or bool(ch)
+        if flag:
+            self._changed[(li, ei)] = ch
+        else:
+            self._changed.pop((li, ei), None)
+        for iid in (f"L{li}E{ei}", f"F{li}E{ei}"):
+            if self.tree.exists(iid):
+                self.tree.item(iid, text=self._entry_text(e, flag), tags=('changed',) if flag else ())
 
     @staticmethod
     def _widget_text(w):
@@ -2723,6 +2855,18 @@ class ParEditorApp:
         name = current or f'field {field_idx}'
         menu.add_command(label=tr("Show '{f}' in all entries").format(f=name),
                          command=lambda: self.field_everywhere(name))
+        e = self.current_entry
+        if e is not None and field_idx < len(e.fields):
+            before = self._orig_entry(self.current_li, e.name)
+            if before is not None and field_idx < len(before.fields) and not WT.same_value(
+                    before.fields[field_idx].value, e.fields[field_idx].value, e.fields[field_idx].dtype):
+                ov = before.fields[field_idx].value
+                menu.add_command(label=tr("Back to the value when opened ({v})").format(v=BT.show(ov, 30)),
+                                 command=lambda: self._reset_field(field_idx, ov, tr('value when opened')))
+            if self.game_ref and self.game_ref.differs(e, field_idx):
+                gv = self.game_ref.value(e, field_idx)
+                menu.add_command(label=tr("Reset to the game's value ({v})").format(v=BT.show(gv, 30)),
+                                 command=lambda: self._reset_field(field_idx, gv, tr("game's value")))
         menu.add_separator()
         if current:
             menu.add_command(
@@ -2744,9 +2888,9 @@ class ParEditorApp:
         """[(li, ei)] of every entry selected in the tree."""
         out = []
         for iid in self.tree.selection():
-            if iid.startswith('L') and 'E' in iid:
-                a, b = iid[1:].split('E')
-                out.append((int(a), int(b)))
+            hit = self._iid_entry(iid)
+            if hit and hit not in out:
+                out.append(hit)
         return out
 
     def bulk_edit(self, scope=None, key=None, preset=None):
@@ -2832,6 +2976,234 @@ class ParEditorApp:
             return
         self._load_par(path)
 
+    # ── 1.8.0: game values, favourites, templates, csv, jump box ──
+
+    def quick_jump(self):
+        if not self.par:
+            return
+        import extraui
+        return extraui.QuickJump(self)
+
+    def _reset_field(self, fi, value, what):
+        self._apply_current_edits()
+        e, li, ei = self.current_entry, self.current_li, self.current_ei
+        if e is None:
+            return
+        self.push_undo(('entry', li, ei), tr("reset {name}").format(name=e.name))
+        e.fields[fi].value = copy.deepcopy(value)
+        self.modified = True
+        self._update_title()
+        self._show_entry(li, ei)
+        self._mark_tree_entry(li, ei)
+        self._set_status(tr("{name}: field {fi} back to the {what}. Undo with Ctrl+Z.").format(name=e.name, fi=fi, what=what))
+
+    def reset_entry_to_game(self, li, ei):
+        self._apply_current_edits()
+        e = self.par.lists[li].entries[ei]
+        ref = self.game_ref.entry(e.name) if self.game_ref else None
+        if ref is None or len(ref.fields) != len(e.fields):
+            return
+        self.push_undo(('entry', li, ei), tr("reset {name}").format(name=e.name))
+        n = 0
+        for f, rf in zip(e.fields, ref.fields):
+            if f.dtype == rf.dtype and not WT.same_value(f.value, rf.value, f.dtype):
+                f.value = copy.deepcopy(rf.value)
+                n += 1
+        if n:
+            self.modified = True
+            self._update_title()
+        self._refresh_after_change()
+        self._set_status(tr("{name}: {n} fields back to the game's values. Undo with Ctrl+Z.").format(name=e.name, n=n))
+
+    def _toggle_game(self):
+        self.cfg['show_game_values'] = bool(self.game_var.get())
+        self.cfg.save()
+        if self.game_var.get() and self.game_ref is None:
+            self._load_game_ref()
+        self._fill_notes()
+
+    def _pick_game_par(self):
+        p = filedialog.askopenfilename(title=tr("The game's par (WDFiles\\Update16.wd)"),
+                                       filetypes=[(tr("PAR or WD archive"), "*.par *.wd"), ("All Files", "*.*")])
+        if not p:
+            return
+        self.cfg['original_par_path'] = p
+        self._cmp_original_path = p
+        self.cfg.save()
+        self.game_var.set(True)
+        self.cfg['show_game_values'] = True
+        self._load_game_ref()
+
+    def _load_game_ref(self):
+        """Read the game's par in the background; the notes appear when it is in."""
+        self.game_ref = None
+        if not self.game_var.get() or not self.par:
+            return
+        path = WT.find_game_par(self.filepath, self.cfg.get('original_par_path'))
+        if not path:
+            return
+        try:
+            if self.filepath and os.path.samefile(path, self.filepath) and self.orig is not None:
+                self.game_ref = WT.RefIndex(self.orig, path)
+                return
+        except OSError:
+            pass
+        import threading
+        self._game_result = None
+
+        def work():
+            try:
+                data = read_par_source(path)[0]
+                self._game_result = WT.RefIndex(read_par(data), path)
+            except Exception as e:           # a broken or foreign file: no notes, say so
+                self._game_result = e
+        threading.Thread(target=work, daemon=True).start()
+        self._poll_game_ref(path)
+
+    def _poll_game_ref(self, path, tries=0):
+        res = self._game_result
+        if res is None:
+            if tries < 400:
+                self.root.after(100, lambda: self._poll_game_ref(path, tries + 1))
+            return
+        if isinstance(res, Exception):
+            self._set_status(tr("Could not read the game's par ({p}): {e}").format(p=os.path.basename(path), e=res))
+            return
+        self.game_ref = res
+        self._fill_notes()
+
+    def toggle_favorite(self, name):
+        favs = [n for n in self.cfg.get('favorites') or [] if isinstance(n, str)]
+        if name in favs:
+            favs.remove(name)
+        else:
+            favs.append(name)
+        self.cfg['favorites'] = favs
+        self.cfg.save()
+        self._apply_current_edits()
+        self._refresh_after_change()
+
+    def _templates_path(self):
+        return os.path.join(data_dir(), 'entry_templates.json')
+
+    def templates(self):
+        return WT.load_templates(self._templates_path())
+
+    def save_template(self, li, ei):
+        if not self.par or li is None or ei is None or ei < 0:
+            return
+        self._apply_current_edits()
+        e = self.par.lists[li].entries[ei]
+        name = simpledialog.askstring(tr("Save as template"), tr("Name of the template:"),
+                                      initialvalue=e.name, parent=self.root)
+        if not name or not name.strip():
+            return
+        temps = self.templates()
+        temps[name.strip()] = WT.make_template(e, FieldLabels.sheet_of(self.par, li))
+        try:
+            WT.save_templates(self._templates_path(), temps)
+        except OSError as ex:
+            self.error('export.failed', 'Saving a template failed', tr("Failed to save:") + f"\n{ex}", 'work')
+            return
+        self._set_status(tr("Template '{n}' saved. Right-click a list of the same sheet > New entry from template.").format(n=name.strip()))
+
+    def delete_template(self, name):
+        temps = self.templates()
+        if name in temps and messagebox.askyesno(tr("Entry templates"), tr("Delete the template {n}?").format(n=name),
+                                                 parent=self.root):
+            del temps[name]
+            WT.save_templates(self._templates_path(), temps)
+
+    def new_from_template(self, li, tname):
+        t = self.templates().get(tname)
+        if not t or not self.par:
+            return
+        self._apply_current_edits()
+        new_name = simpledialog.askstring(tr("New entry from template"), tr("Name of the new entry:"),
+                                          initialvalue=WT.free_name(self.par, t['entry']), parent=self.root)
+        if not new_name or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        if any(e.name == new_name for pl in self.par.lists for e in pl.entries):
+            if not messagebox.askyesno(tr("Name exists"), tr("'{name}' already exists.\nRename anyway?").format(name=new_name),
+                                       parent=self.root):
+                return
+        self.push_undo(('list', li), tr("add {name}").format(name=new_name))
+        self.par.lists[li].entries.append(WT.entry_from_template(t, new_name, ParEntry, ParField))
+        self.modified = True
+        self._update_title()
+        self._populate_tree()
+        ei = len(self.par.lists[li].entries) - 1
+        self._open_list(f"L{li}")
+        self._select_iid(f"L{li}E{ei}")
+        self._set_status(tr("Added '{name}' from the template {t}.").format(name=new_name, t=tname))
+
+    def export_csv(self, scope=None, key=None):
+        if not self.par:
+            return
+        self._apply_current_edits()
+        if scope is None:
+            if len(self.selected_entries()) > 1:
+                scope = 'selected'
+            elif self.current_li is not None and self.current_li >= 0:
+                scope, key = 'list', self.current_li
+            else:
+                self._set_status(tr("Select a list, a category or several entries first."))
+                return
+        from categories import category_of
+        tg = BT.targets(self.par, scope, key, selected=self.selected_entries(), category_of=category_of)
+        if not tg:
+            return
+        stem = {'category': str(key), 'list': FieldLabels.sheet_of(self.par, key) or f'list{key}'}.get(scope, 'selection')
+        path = filedialog.asksaveasfilename(title=tr("Export table (CSV)"), defaultextension='.csv',
+                                            initialfile=f"{stem}.csv", filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        try:
+            n = WT.export_csv(self.par, tg, self.field_labels, path)
+        except OSError as ex:
+            self.error('export.failed', 'Exporting a CSV table failed', tr("Failed to export:") + f"\n{ex}", 'work')
+            return
+        self._set_status(tr("{n} entries written to {f}. Edit them in Excel or LibreOffice, then File > Import table.").format(
+            n=n, f=os.path.basename(path)))
+
+    def import_csv(self):
+        if not self.par:
+            return
+        self._apply_current_edits()
+        path = filedialog.askopenfilename(title=tr("Import table (CSV)"), filetypes=[("CSV", "*.csv *.txt"), ("All Files", "*.*")])
+        if not path:
+            return
+        try:
+            changes, problems = WT.import_csv(self.par, path, self.field_labels, BT.Change)
+        except (OSError, UnicodeDecodeError, csv.Error) as ex:
+            self.error('csv.import', 'Importing a CSV table failed', tr("Failed to import:") + f"\n{ex}", 'work')
+            return
+        if problems and not changes:
+            self.error('csv.import', 'CSV table: nothing to import', '\n'.join(problems[:30]), 'work')
+            return
+        if not changes:
+            self._set_status(tr("The table holds no values that differ from the par."))
+            return
+        import bulkui
+        head = tr("{f}: {n} fields would change.").format(f=os.path.basename(path), n=len(changes))
+        if problems:
+            head += ' ' + tr("{k} cells skipped (see the status line).").format(k=len(problems))
+        dlg = bulkui.ReviewDialog(self, changes, saving=False, head=head, ok_text=tr("Import the ticked"),
+                                  note=tr("Click a row (or press Space) to leave that field as it is."))
+        self.root.wait_window(dlg.win)
+        if dlg.result is None:
+            return
+        drop = set(map(id, dlg.result))
+        keep = [c for c in changes if id(c) not in drop]
+        if keep:
+            self.push_undo(('all',), tr("import {f}").format(f=os.path.basename(path)))
+            BT.apply_changes(self.par, keep)
+        msg = tr("Imported {n} fields from {f}. Undo with Ctrl+Z.").format(n=len(keep), f=os.path.basename(path))
+        if problems:
+            msg += '  |  ' + '; '.join(problems[:3])
+        self.after_bulk(msg) if keep else self._set_status(msg)
+
     def _add_label(self, sheet, field_idx):
         """Add a new label for a field."""
         if not sheet:
@@ -2843,6 +3215,7 @@ class ParEditorApp:
         if name and name.strip():
             self.field_labels.set(sheet, field_idx, name.strip())
             self._set_status(f"Label [{field_idx}] = '{name.strip()}' (for all {sheet} entries)")
+            self._drop_pool()
             # Refresh display
             if self.current_entry:
                 self._show_entry(self.current_li, self.current_ei)
@@ -2857,12 +3230,14 @@ class ParEditorApp:
         if name and name.strip():
             self.field_labels.set(sheet, field_idx, name.strip())
             self._set_status(f"Renamed [{field_idx}] → '{name.strip()}'")
+            self._drop_pool()
             if self.current_entry:
                 self._show_entry(self.current_li, self.current_ei)
 
     def _remove_label(self, sheet, field_idx):
         """Drop the user override; the SDK name shows again."""
         self.field_labels.remove(sheet, field_idx)
+        self._drop_pool()
         self._set_status(f"Restored SDK name for [{field_idx}]")
         if self.current_entry:
             self._show_entry(self.current_li, self.current_ei)
@@ -2881,17 +3256,20 @@ class ParEditorApp:
         self.tree.focus(item_id)
 
         menu = theme.Menu(self.root)
+        if item_id == 'FAV':
+            return
         if item_id.startswith('C'):
             cat = CATEGORIES[int(item_id[1:])]
             menu.add_command(label=tr("Bulk edit category '{c}'...").format(c=tr(cat)),
                              command=lambda: self.bulk_edit('category', cat))
+            menu.add_command(label=tr("Export category as table (CSV)..."),
+                             command=lambda: self.export_csv('category', cat))
             menu.tk_popup(event.x_root, event.y_root)
             return
 
-        if item_id.startswith('L') and 'E' in item_id:
-            # Entry node: L{li}E{ei}
-            parts = item_id[1:].split('E')
-            li, ei = int(parts[0]), int(parts[1])
+        hit = self._iid_entry(item_id)
+        if hit:
+            li, ei = hit
             entry = self.par.lists[li].entries[ei]
 
             menu.add_command(
@@ -2909,6 +3287,19 @@ class ParEditorApp:
                 else tr("Bulk edit..."),
                 command=lambda: self.bulk_edit('selected' if n_sel > 1 else 'list', li if n_sel <= 1 else None))
             menu.add_separator()
+            pinned = entry.name in (self.cfg.get('favorites') or [])
+            menu.add_command(
+                label=tr("Remove from favourites") if pinned else tr("\u2605 Add to favourites"),
+                command=lambda: self.toggle_favorite(entry.name))
+            menu.add_command(label=tr("Save as template..."), command=lambda: self.save_template(li, ei))
+            if n_sel > 1:
+                menu.add_command(label=tr("Export {n} selected entries as table (CSV)...").format(n=n_sel),
+                                 command=lambda: self.export_csv('selected'))
+            ref = self.game_ref.entry(entry.name) if self.game_ref else None
+            if ref is not None and len(ref.fields) == len(entry.fields):
+                menu.add_command(label=tr("Reset '{name}' to the game's values").format(name=entry.name),
+                                 command=lambda: self.reset_entry_to_game(li, ei))
+            menu.add_separator()
             menu.add_command(
                 label=f"\u2716 Delete '{entry.name}'",
                 command=lambda: self._delete_entry(li, ei))
@@ -2920,6 +3311,18 @@ class ParEditorApp:
             menu.add_command(
                 label=tr("Bulk edit this list..."),
                 command=lambda: self.bulk_edit('list', li))
+            menu.add_command(label=tr("Export list as table (CSV)..."),
+                             command=lambda: self.export_csv('list', li))
+            sheet = FieldLabels.sheet_of(self.par, li)
+            count = len(pl.entries[0].fields) if pl.entries else None
+            fits = {n: t for n, t in self.templates().items()
+                    if count is not None and WT.template_fits(t, sheet, count)}
+            tsub = theme.Menu(menu)
+            for name in sorted(fits):
+                tsub.add_command(label=name, command=lambda n=name: self.new_from_template(li, n))
+            if not fits:
+                tsub.add_command(label=tr("(no template for this sheet yet)"), state='disabled')
+            menu.add_cascade(label=tr("New entry from template"), menu=tsub)
             menu.add_command(
                 label=f"Add New Entry to List {li}...",
                 command=lambda: self._add_entry_to_list(li))
@@ -3133,7 +3536,10 @@ class ParEditorApp:
         self._set_status(f"Added '{new_name}' to List {li}")
 
     def _suggest_next_name(self, name):
-        """Suggest next name by incrementing trailing number."""
+        """The next name that is not taken yet (1.8.0); without a par the
+        plain increment."""
+        if self.par:
+            return WT.free_name(self.par, name)
         import re
         m = re.match(r'^(.*?)(\d+)$', name)
         if m:
@@ -3151,20 +3557,18 @@ class ParEditorApp:
         else:
             self._set_status(tr("Done - the entry is hidden by the current filter or group."))
 
-    def _clear_detail(self):
-        """Clear the detail panel."""
-        # the input checks hang on the StringVars; Tcl keeps those callbacks
-        # (and with them var and widget) alive until the trace is removed -
-        # without this every selected entry leaked ~60 Tcl commands
-        for _fi, _dt, var in getattr(self, 'edit_widgets', []):
-            if isinstance(var, tk.Variable):
-                try:
-                    for mode, cb in var.trace_info():
-                        var.trace_remove(mode, cb)
-                except tk.TclError:
-                    pass
+    def _clear_detail(self, keep_rows=False):
+        """Clear the detail panel. keep_rows: the next entry reuses the rows,
+        leave them on screen (_show_entry)."""
+        # the rows of the last layout stay (hidden) for the next entry; their
+        # input checks are removed in _drop_pool when the layout changes
+        pool = self._pool
         for w in self.detail_inner.winfo_children():
-            w.destroy()
+            if pool is not None and w is pool['frame']:
+                if not keep_rows:
+                    w.pack_forget()
+            else:
+                w.destroy()
         self.detail_header.configure(text=tr("Select an entry"))
         self.detail_info.configure(text="")
         self.field_error.configure(text="")
@@ -3238,6 +3642,8 @@ class ParEditorApp:
             self.redo_stack.clear()
             self.modified = True
             self._update_title()
+            self._fill_notes()
+            self._mark_tree_entry(self.current_li, self.current_ei)
 
     # ── Search ──
 
@@ -3984,6 +4390,9 @@ ERROR_TIPS = {
     'export.failed': ('trouble',
         'Pick a folder you can write to, for example Documents, and try again.',
         'Einen Ordner waehlen, in den du schreiben darfst, zum Beispiel Dokumente, und noch einmal.'),
+    'csv.import': ('work',
+        'Save the table as CSV (semicolon or comma) and keep the first row with list, sheet and entry. Point or comma both work as decimal sign; an empty cell leaves the field alone.',
+        'Die Tabelle als CSV speichern (Semikolon oder Komma) und die erste Zeile mit list, sheet und entry behalten. Punkt und Komma gehen beide als Dezimalzeichen; eine leere Zelle laesst das Feld, wie es ist.'),
     'crash': ('trouble',
         'Please report it: the log goes with it, and nothing is sent before you have seen it.',
         'Bitte melden: das Protokoll geht mit, und nichts wird verschickt, bevor du es gesehen hast.'),
@@ -4147,6 +4556,59 @@ def run_gui(path=None):
 # ------------------------------------------------------------------ Deutsch --
 
 DE = {
+    # 1.8.0: marks, game values, favourites, templates, csv, jump box
+    '(no template for this sheet yet)': '(noch keine Vorlage fuer dieses Blatt)',
+    '(none yet - right-click an entry)': '(noch keine - Rechtsklick auf einen Eintrag)',
+    "Added '{name}' from the template {t}.": "'{name}' aus der Vorlage {t} angelegt.",
+    'Back to the value when opened ({v})': 'Zurueck auf den Wert beim Oeffnen ({v})',
+    'Changed entries only': 'Nur geaenderte Eintraege',
+    'Changed only': 'Nur geaenderte',
+    'Click a row (or press Space) to leave that field as it is.': 'Eine Zeile anklicken (oder Leertaste), um dieses Feld zu lassen, wie es ist.',
+    "Could not read the game's par ({p}): {e}": 'Die Par des Spiels liess sich nicht lesen ({p}): {e}',
+    "Delete template '{n}'": "Vorlage '{n}' loeschen",
+    'Delete the template {n}?': 'Die Vorlage {n} loeschen?',
+    'Entry templates': 'Eintragsvorlagen',
+    'Export category as table (CSV)...': 'Kategorie als Tabelle exportieren (CSV)...',
+    'Export list as table (CSV)...': 'Liste als Tabelle exportieren (CSV)...',
+    'Export table (CSV)': 'Tabelle exportieren (CSV)',
+    'Export table (CSV)...': 'Tabelle exportieren (CSV)...',
+    'Export {n} selected entries as table (CSV)...': '{n} gewaehlte Eintraege als Tabelle exportieren (CSV)...',
+    'Favourites': 'Favoriten',
+    'Import table (CSV)': 'Tabelle importieren (CSV)',
+    'Import table (CSV)...': 'Tabelle importieren (CSV)...',
+    'Import the ticked': 'Angehakte importieren',
+    'Imported {n} fields from {f}. Undo with Ctrl+Z.': '{n} Felder aus {f} importiert. Rueckgaengig mit Strg+Z.',
+    'Jump to entry': 'Zu Eintrag springen',
+    'Jump to entry...': 'Zu Eintrag springen...',
+    'Name of the new entry:': 'Name des neuen Eintrags:',
+    'Name of the template:': 'Name der Vorlage:',
+    'New entry from template': 'Neuer Eintrag aus Vorlage',
+    'Remove from favourites': 'Aus den Favoriten nehmen',
+    "Reset '{name}' to the game's values": "'{name}' auf die Werte des Spiels zuruecksetzen",
+    "Reset to the game's value ({v})": 'Auf den Wert des Spiels zuruecksetzen ({v})',
+    'Save as template': 'Als Vorlage speichern',
+    'Save as template...': 'Als Vorlage speichern...',
+    'Save entry as template...': 'Eintrag als Vorlage speichern...',
+    'Select a list, a category or several entries first.': 'Zuerst eine Liste, eine Kategorie oder mehrere Eintraege waehlen.',
+    "Set the game's par...": 'Par des Spiels festlegen...',
+    "Show the game's values": 'Werte des Spiels zeigen',
+    "Template '{n}' saved. Right-click a list of the same sheet > New entry from template.": "Vorlage '{n}' gespeichert. Rechtsklick auf eine Liste desselben Blatts > Neuer Eintrag aus Vorlage.",
+    "The game's par (WDFiles\\Update16.wd)": 'Die Par des Spiels (WDFiles\\Update16.wd)',
+    'The table holds no values that differ from the par.': 'Die Tabelle enthaelt keine Werte, die von der Par abweichen.',
+    'Type part of an entry name - Enter jumps there. Several words: all must match.': 'Einen Teil des Namens tippen - Enter springt hin. Mehrere Woerter: alle muessen passen.',
+    'game': 'Spiel',
+    "game's value": 'den Wert des Spiels',
+    'import {f}': 'Import {f}',
+    'reset {name}': '{name} zuruecksetzen',
+    'value when opened': 'den Wert beim Oeffnen',
+    'was': 'war',
+    '{f}: {n} fields would change.': '{f}: {n} Felder wuerden sich aendern.',
+    '{k} cells skipped (see the status line).': '{k} Zellen uebersprungen (siehe Statuszeile).',
+    '{name}: field {fi} back to the {what}. Undo with Ctrl+Z.': '{name}: Feld {fi} zurueck auf {what}. Rueckgaengig mit Strg+Z.',
+    "{name}: {n} fields back to the game's values. Undo with Ctrl+Z.": '{name}: {n} Felder zurueck auf die Werte des Spiels. Rueckgaengig mit Strg+Z.',
+    '{n} entries written to {f}. Edit them in Excel or LibreOffice, then File > Import table.': '{n} Eintraege nach {f} geschrieben. In Excel oder LibreOffice bearbeiten, dann Datei > Tabelle importieren.',
+    '★ Add to favourites': '★ Zu den Favoriten',
+    'Show only entries that differ from the file as it was opened.\nChanged entries carry a blue dot in the tree, changed fields a blue number.': 'Nur Eintraege zeigen, die sich seit dem Oeffnen geaendert haben.\nGeaenderte Eintraege tragen im Baum einen blauen Punkt, geaenderte Felder eine blaue Nummer.',
     # 1.7.0: bulk edit, presets, review, references, errors
     "'{f}' in all entries": "'{f}' in allen Eintraegen",
     '(none yet - save one in Bulk edit)': '(noch keine - in Massenbearbeitung speichern)',

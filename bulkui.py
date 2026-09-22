@@ -257,7 +257,7 @@ class BulkDialog:
 class ReviewDialog:
     """Every change since opening; untick what should not be saved."""
 
-    def __init__(self, app, changes, saving=True):
+    def __init__(self, app, changes, saving=True, head=None, ok_text=None, note=None):
         tr = _tr
         self.app, self.changes = app, changes
         self.keep = {i: True for i, c in enumerate(changes) if c.kind == 'field'}
@@ -275,11 +275,11 @@ class ReviewDialog:
         f.pack(fill='both', expand=True)
         fields = sum(1 for c in changes if c.kind == 'field')
         entries = sum(1 for c in changes if c.kind != 'field')
-        head = tr('{n} fields changed since the file was opened.').format(n=fields)
+        head = head or tr('{n} fields changed since the file was opened.').format(n=fields)
         if entries:
             head += ' ' + tr('{k} entries added or removed (undo those with Ctrl+Z).').format(k=entries)
         ttk.Label(f, text=head, style='H2.TLabel', wraplength=940, justify='left').pack(anchor='w')
-        ttk.Label(f, text=tr('Click a row (or press Space) to keep or drop it. Dropped changes get their old value back.'),
+        ttk.Label(f, text=note or tr('Click a row (or press Space) to keep or drop it. Dropped changes get their old value back.'),
                   style='Muted.TLabel').pack(anchor='w', pady=(2, 8))
         lf = ttk.Frame(f)
         lf.pack(fill='both', expand=True)
@@ -311,7 +311,7 @@ class ReviewDialog:
         ttk.Button(btns, text=tr('Keep all'), command=lambda: self._all(True)).pack(side='left')
         ttk.Button(btns, text=tr('Drop all'), command=lambda: self._all(False)).pack(side='left', padx=6)
         ttk.Button(btns, text=tr('Back') if saving else tr('Close'), command=self.cancel).pack(side='right')
-        ttk.Button(btns, text=tr('Save') if saving else tr('Drop the unticked'), style='Accent.TButton',
+        ttk.Button(btns, text=ok_text or (tr('Save') if saving else tr('Drop the unticked')), style='Accent.TButton',
                    command=self.ok).pack(side='right', padx=6)
         win.update_idletasks()
         win.geometry(f'+{app.root.winfo_rootx() + 60}+{app.root.winfo_rooty() + 50}')

@@ -88,6 +88,62 @@
     "de": "Die Datei geht auf, das Fenster bleibt offen.",
     "en": "The file opens, the window stays open."
    }
+  },
+  {
+   "id": "csv-in-excel",
+   "since": "1.8.0",
+   "needs_run": false,
+   "title": {
+    "de": "Tabelle in Excel oder LibreOffice bearbeiten und zurueckholen",
+    "en": "Edit a table in Excel or LibreOffice and bring it back"
+   },
+   "why": {
+    "de": "Der CSV-Weg ist mit einer nachgebauten Tabelle geprueft, nicht mit einer echten Tabellenkalkulation (Excel speichert je nach Sprache anders).",
+    "en": "The CSV path is tested with a made-up table, not with a real spreadsheet (Excel saves differently per language)."
+   },
+   "steps": {
+    "de": [
+     "Rechtsklick auf die Kategorie Gegner > Kategorie als Tabelle exportieren.",
+     "Die Datei in Excel oder LibreOffice oeffnen, in der Spalte initParamHP ein paar Werte aendern, als CSV speichern.",
+     "Im Editor Datei > Tabelle importieren, die Datei waehlen."
+    ],
+    "en": [
+     "Right-click the Enemies category > Export category as table.",
+     "Open the file in Excel or LibreOffice, change a few values in the initParamHP column, save as CSV.",
+     "In the editor File > Import table, pick the file."
+    ]
+   },
+   "expect": {
+    "de": "Das Pruef-Fenster zeigt genau die geaenderten Werte, nach Angehakte importieren stehen sie in den Eintraegen.",
+    "en": "The review window shows exactly the changed values; after Import the ticked they are in the entries."
+   }
+  },
+  {
+   "id": "game-values-with-a-mod",
+   "since": "1.8.0",
+   "needs_run": false,
+   "title": {
+    "de": "Werte des Spiels neben einer Mod-Par",
+    "en": "The game's values next to a mod par"
+   },
+   "why": {
+    "de": "Die Suche nach der Par des Spiels ist nur auf einem Rechner mit Steam-Bibliothek auf F: geprueft.",
+    "en": "Finding the game's par is only tested on one PC with the Steam library on F:."
+   },
+   "steps": {
+    "de": [
+     "Eine eigene Mod-.wd aus dem Mods-Ordner oeffnen (eine mit geaenderten Werten).",
+     "Einen geaenderten Eintrag anklicken."
+    ],
+    "en": [
+     "Open one of your mod .wd files from the Mods folder (one with changed values).",
+     "Click a changed entry."
+    ]
+   },
+   "expect": {
+    "de": "Neben den geaenderten Feldern steht klein 'Spiel ...' mit dem Wert aus Update16.wd; Rechtsklick auf den Feldnamen bietet das Zuruecksetzen an.",
+    "en": "Next to the changed fields a small 'game ...' shows the value from Update16.wd; right-clicking the field name offers the reset."
+   }
   }
  ]
 }

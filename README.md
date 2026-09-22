@@ -7,6 +7,11 @@ A GUI editor for Two Worlds 1 `.par` parameter files — the core data format th
 ## Features
 
 - **Opens the game archives** - pick `WDFiles\Update16.wd`, the editor finds the par inside; saving writes a mod `.wd` into `Mods\`, the game archive is never touched (v1.6)
+- **See what changed** - blue dot on changed entries, blue number and "was 80" on changed fields, a "Changed only" filter (v1.8)
+- **The game's values** - with a mod open, the value from `Update16.wd` next to every field that differs; reset one field or a whole entry (v1.8)
+- **Favourites, templates, jump box** - pin entries at the top of the tree; keep an entry as template for new ones with the next free name; Ctrl+P jumps to any entry by name (v1.8)
+- **CSV tables** - a list, a category or a selection as table for Excel or LibreOffice, and back with a review of every change (v1.8)
+- **Quick switching** - entries of the same sheet reuse the rows: a click takes 0.03 s instead of 0.8 s (v1.8)
 - **Bulk edit and presets** - change one field in many entries at once (selection, list, category or search results): set, add, change by %, replace text; the field is picked by its SDK name, so field 34 is `initParamHP` for units and `wpDamColdMax` for weapons - the name decides; save the operation as a preset (v1.7)
 - **Review before saving** - every change since opening with old and new value; untick a row and that field keeps its old value (v1.7)
 - **Find references** - every entry that names this one in a text field, and one field across all entries (v1.7)
@@ -183,6 +188,32 @@ These are **not separate PAR fields** — they are all part of the single `mesh`
 MIT
 
 ## Changelog
+
+### v1.8.0 (22.09.2026)
+
+- **Change marks.** Entries that differ from the file as opened carry a blue
+  dot in the tree (their list too); changed fields get a blue number and a
+  small "was 80". **Changed only** in the toolbar hides the rest. Saving
+  starts the marks again.
+- **The game's values.** With a mod par open, the editor reads the game's
+  `WDFiles\Update16.wd` in the background (found above the opened folder or
+  in the usual Steam folders, or set under View) and shows "game 100" where
+  a field differs. Right-click a field name > Reset to the game's value,
+  right-click an entry > Reset to the game's values.
+- **Favourites.** Right-click an entry > Add to favourites; the group sits at
+  the top of the tree and is kept between sessions.
+- **Entry templates.** Save an entry as template, then right-click a list of
+  the same sheet > New entry from template. The name is the next free one,
+  text fields with the old name get the new one. Duplicate suggests the next
+  free name as well.
+- **CSV export and import.** A list, a category or a selection as table
+  (semicolon, one column per field name, array items split by ` | `).
+  Importing shows every change in the review window first; empty cells are
+  skipped, point and comma both work as decimal sign. One Ctrl+Z undoes it.
+- **Jump box** (Ctrl+P): type part of a name, Enter jumps there.
+- **Faster selection.** Entries with the same layout reuse the rows of the
+  one before and keep the scroll position: 0.03 s per click instead of 0.8 s.
+- Guide: new chapter Working faster.
 
 ### v1.7.1 (22.09.2026)
 

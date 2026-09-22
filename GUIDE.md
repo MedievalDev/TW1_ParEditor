@@ -143,6 +143,18 @@ Bulk presets calls it up again.
   in every entry.
 - Drop a `.par`, `.wd` or `.json` from Explorer onto the window to open it.
 
+## Working Faster (v1.8)
+
+- Blue dot = entry changed since opening, blue field number = field changed,
+  "was 80" = its value when opened. **Changed only** in the toolbar filters.
+- With a mod open, "game 100" shows the value from `Update16.wd`. Right-click
+  the field name to reset it, right-click an entry to reset all its fields.
+- Right-click an entry > Add to favourites / Save as template. Right-click a
+  list > New entry from template.
+- File > Export table (CSV) / Import table (CSV); right-click a list or a
+  category to export just that.
+- Ctrl+P: jump to an entry by name.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
