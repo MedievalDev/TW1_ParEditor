@@ -1,0 +1,93 @@
+{
+ "tests": [
+  {
+   "id": "bulk-edit-ingame",
+   "since": "1.7.0",
+   "needs_run": true,
+   "title": {
+    "de": "Massenbearbeitung wirkt im Spiel",
+    "en": "A bulk edit works in the game"
+   },
+   "why": {
+    "de": "Die Massenbearbeitung ist gegen die echte Par gemessen, aber noch nicht im Spiel gesehen.",
+    "en": "The bulk edit is measured against the real par, but not yet seen in the game."
+   },
+   "steps": {
+    "de": [
+     "WDFiles\\Update16.wd oeffnen.",
+     "Rechtsklick auf die Kategorie Gegner > gemeinsam bearbeiten.",
+     "Feld maxHP, Aktion Um % aendern, Wert 50, Vorschau, Anwenden.",
+     "Speichern (als Mod in den Mods-Ordner), im Mod Manager einschalten.",
+     "Spiel starten, einen Gegner angreifen."
+    ],
+    "en": [
+     "Open WDFiles\\Update16.wd.",
+     "Right-click the Enemies category > bulk edit.",
+     "Field maxHP, operation Change by %, value 50, Preview, Apply.",
+     "Save (as a mod into the Mods folder), enable it in the Mod Manager.",
+     "Start the game, attack an enemy."
+    ]
+   },
+   "expect": {
+    "de": "Der Gegner haelt spuerbar mehr aus, das Spiel laeuft normal.",
+    "en": "The enemy takes clearly more hits, the game runs normally."
+   }
+  },
+  {
+   "id": "review-drops-a-change",
+   "since": "1.7.0",
+   "needs_run": false,
+   "title": {
+    "de": "Pruefen vor dem Speichern verwirft eine Aenderung",
+    "en": "The review before saving drops a change"
+   },
+   "why": {
+    "de": "Ob verworfene Aenderungen nach dem Speichern wirklich ihren alten Wert haben, ist nur hier geprueft.",
+    "en": "Whether dropped changes really keep their old value after saving is only measured here."
+   },
+   "steps": {
+    "de": [
+     "Zwei Felder in zwei Eintraegen aendern.",
+     "Speichern.",
+     "Im Pruef-Fenster eine Zeile anklicken (Haken weg), Speichern.",
+     "Datei neu oeffnen und beide Felder ansehen."
+    ],
+    "en": [
+     "Change two fields in two entries.",
+     "Save.",
+     "In the review window click one row (tick gone), Save.",
+     "Open the file again and look at both fields."
+    ]
+   },
+   "expect": {
+    "de": "Das angehakte Feld hat den neuen Wert, das verworfene den alten.",
+    "en": "The ticked field has the new value, the dropped one the old."
+   }
+  },
+  {
+   "id": "drop-par-with-the-mouse",
+   "since": "1.7.0",
+   "needs_run": false,
+   "title": {
+    "de": "Eine .par oder .wd mit der Maus ablegen",
+    "en": "Drop a .par or .wd with the mouse"
+   },
+   "why": {
+    "de": "Das Ablegen ist mit einer nachgestellten Windows-Nachricht geprueft, nicht mit der echten Maus.",
+    "en": "Dropping is tested with a simulated Windows message, not with the real mouse."
+   },
+   "steps": {
+    "de": [
+     "Im Explorer eine .wd oder .par auf das Editorfenster ziehen."
+    ],
+    "en": [
+     "Drag a .wd or .par from Explorer onto the editor window."
+    ]
+   },
+   "expect": {
+    "de": "Die Datei geht auf, das Fenster bleibt offen.",
+    "en": "The file opens, the window stays open."
+   }
+  }
+ ]
+}

@@ -104,6 +104,27 @@ Rechtsklick auf einen **Listen-Knoten**:
 - **Add New Entry** — Fügt einen leeren Eintrag mit gleicher Feld-Struktur hinzu.
 - **Duplicate Last Entry** — Schnellzugriff zum Klonen des letzten Eintrags.
 
+## Massenbearbeitung und Vorlagen (v1.7)
+
+Strg+B, oder Rechtsklick auf eine Liste, eine Kategorie oder mehrere
+gewaehlte Eintraege. Feld nach Namen waehlen, Aktion (Setzen auf,
+Addieren, Um % aendern, Text ersetzen `alt=>neu`) und Wert, **Vorschau**,
+dann **Anwenden**. Strg+Z nimmt die ganze Aenderung zurueck.
+**Als Vorlage speichern...** merkt sich die Aktion; Bearbeiten > Vorlagen
+fuer Massenbearbeitung ruft sie wieder auf.
+
+## Pruefen und Verweise (v1.7)
+
+- Beim Speichern erscheint jede Aenderung seit dem Oeffnen. Eine Zeile
+  anklicken verwirft sie - das Feld behaelt den alten Wert. Bearbeiten >
+  Aenderungen vor dem Speichern pruefen schaltet das ab.
+- Rechtsklick auf einen Eintrag > Verweise suchen (Strg+R) zeigt jeden
+  Eintrag, der ihn in einem Textfeld nennt.
+- Rechtsklick auf einen Feldnamen > in allen Eintraegen zeigen listet den
+  Wert dieses Felds in jedem Eintrag.
+- Eine `.par`, `.wd` oder `.json` aus dem Explorer aufs Fenster ziehen
+  oeffnet sie.
+
 ## Compare & Merge (PAR-Dateien vergleichen und zusammenführen)
 
 Der "Compare & Merge"-Tab ermöglicht es, zwei PAR-Dateien Feld für Feld zu vergleichen und Änderungen selektiv zu übernehmen.

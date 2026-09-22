@@ -484,11 +484,138 @@ share a count. Since 1.4 the name comes from the sheet of the list.
 ''')
 
 
+
+def ch_bulk():
+    import bulkui
+    ops = [(_l('Setzen auf', 'Set to'), _l('jede Zahl oder jeder Text wird der Wert', 'every number or text becomes the value'), '250'),
+           (_l('Addieren', 'Add'), _l('Zahl dazu, auch negativ', 'adds a number, negative too'), '-5'),
+           (_l('Um % aendern', 'Change by %'), _l('Prozent, gerundet auf den Typ des Feldes', 'percent, rounded to the type of the field'), '20'),
+           (_l('Text ersetzen', 'Replace text'), _l('alt=>neu in Textfeldern', 'old=>new in text fields'), 'Sword=>Blade')]
+    return _l("""# Massenbearbeitung und Vorlagen
+
+Ein Feld in vielen Eintraegen auf einmal aendern: zum Beispiel allen Gegnern
+20 % mehr Lebenspunkte geben.
+
+1. **Welche Eintraege** festlegen: im Baum mehrere Eintraege mit Strg oder
+   Umschalt anklicken, oder per Rechtsklick auf eine Liste oder eine
+   Kategorie **gemeinsam bearbeiten** waehlen. Auch die aktuellen
+   Suchergebnisse lassen sich nehmen. Bearbeiten > Massenbearbeitung
+   (Strg+B) oeffnet dasselbe Fenster.
+2. **Feld** waehlen. Die Liste zeigt jedes Feld mit dem Namen aus dem SDK
+   und in wie vielen Eintraegen es vorkommt. Gewaehlt wird nach Namen, nicht
+   nach Nummer: `maxHP` ist in einer Liste Feld 6, in einer anderen Feld 9.
+   Eintraege ohne dieses Feld bleiben, wie sie sind - die Vorschau zaehlt sie.
+3. **Aktion** und **Wert** eingeben, dann **Vorschau**. Die Liste zeigt jede
+   Aenderung mit altem und neuem Wert.
+4. **Anwenden**. Die Aenderung ist mit Strg+Z rueckgaengig.
+
+""", """# Bulk edit and presets
+
+Change one field in many entries at once: give every enemy 20 % more hit
+points, for example.
+
+1. Set **which entries**: ctrl- or shift-click several entries in the tree,
+   or right-click a list or a category and choose **bulk edit**. The current
+   search results work too. Edit > Bulk edit (Ctrl+B) opens the same window.
+2. Pick the **field**. The list shows every field with its SDK name and in
+   how many entries it occurs. It is chosen by name, not by number: `maxHP`
+   is field 6 in one list and field 9 in another. Entries without that field
+   stay as they are - the preview counts them.
+3. Enter **operation** and **value**, then **Preview**. The list shows every
+   change with the old and the new value.
+4. **Apply**. Ctrl+Z undoes it.
+
+""") + _table([_l('Aktion', 'Operation'), _l('Was sie tut', 'What it does'), _l('Beispiel', 'Example')], ops) \
+        + '\n\n' + _source('bulktools.py, new_value / bulkui.OP_LABELS') + _l("""
+## Vorlagen
+
+**Als Vorlage speichern...** merkt sich Umfang, Feld, Aktion und Wert unter
+einem Namen. Eine Kategorie oder eine Liste wird dabei ueber ihren Namen
+gespeichert, nicht ueber die Nummer - so passt die Vorlage auch nach dem
+naechsten Oeffnen. Bearbeiten > Vorlagen fuer Massenbearbeitung ruft sie auf;
+das Fenster zeigt sofort die Vorschau, angewendet wird erst mit
+**Anwenden**.
+""", """
+## Presets
+
+**Save as preset...** keeps scope, field, operation and value under a name.
+A category or a list is stored by its name, not its number, so the preset
+still fits after opening the file again. Edit > Bulk presets calls one up;
+the window shows the preview at once, nothing changes before **Apply**.
+""")
+
+
+def ch_review():
+    return _l("""# Pruefen und Verweise
+
+## Aenderungen vor dem Speichern pruefen
+
+Beim Speichern zeigt der Editor jede Aenderung seit dem Oeffnen: Eintrag,
+Feld, alter und neuer Wert. Eine Zeile anklicken (oder Leertaste) verwirft
+sie - das Feld bekommt seinen alten Wert zurueck, der Rest wird gespeichert.
+**Zurueck** bricht das Speichern ab. Hinzugefuegte oder geloeschte Eintraege
+stehen in Gold dabei; die nimmt man mit Strg+Z zurueck.
+
+Bearbeiten > Aenderungen pruefen... zeigt dieselbe Liste jederzeit.
+Bearbeiten > Aenderungen vor dem Speichern pruefen schaltet die Frage beim
+Speichern ab und wieder an.
+
+## Verweise suchen
+
+Rechtsklick auf einen Eintrag > **Verweise suchen** (Strg+R): jede Stelle,
+an der ein anderer Eintrag diesen Namen in einem Textfeld traegt - etwa ein
+Gegner, der auf ein Mesh oder einen Klang zeigt. Doppelklick springt hin.
+Vor dem Umbenennen oder Loeschen eines Eintrags lohnt der Blick.
+
+## Ein Feld in allen Eintraegen
+
+Rechtsklick auf einen Feldnamen rechts > **in allen Eintraegen zeigen**:
+eine Liste mit jedem Eintrag, der dieses Feld hat, und seinem Wert. So sieht
+man auf einen Blick, wie stark die anderen Gegner sind, bevor man einen
+aendert.
+
+## Ablegen
+
+Eine `.par`, eine `.wd` oder ein JSON-Export aus dem Explorer auf das Fenster
+ziehen oeffnet die Datei wie Datei > Oeffnen.
+""", """# Review and references
+
+## Review changes before saving
+
+When saving, the editor shows every change since opening: entry, field, old
+and new value. Clicking a row (or Space) drops it - the field gets its old
+value back, the rest is saved. **Back** stops the save. Entries that were
+added or deleted appear in gold; those are undone with Ctrl+Z.
+
+Edit > Review changes... shows the same list at any time. Edit > Review
+changes before saving switches the question on saving off and on.
+
+## Find references
+
+Right-click an entry > **Find references** (Ctrl+R): every place where
+another entry carries this name in a text field - an enemy that points to a
+mesh or a sound, for example. Double click jumps there. Worth a look before
+renaming or deleting an entry.
+
+## One field in all entries
+
+Right-click a field name on the right > **show in all entries**: a list of
+every entry that has this field, with its value. You see at a glance how
+strong the other enemies are before you change one.
+
+## Drop
+
+Dragging a `.par`, a `.wd` or a JSON export from Explorer onto the window
+opens it like File > Open.
+""")
+
 CHAPTERS = (
     ('start', ('Einstieg', 'Getting started'), ch_start),
     ('first', ('Erstes Ergebnis in 10 Minuten', 'First result in 10 minutes'), ch_first),
     ('groups', ('Gruppen und Filter', 'Groups and filter'), ch_groups),
     ('fields', ('Felder bearbeiten', 'Editing fields'), ch_fields),
+    ('bulk', ('Massenbearbeitung und Vorlagen', 'Bulk edit and presets'), ch_bulk),
+    ('review', ('Pruefen und Verweise', 'Review and references'), ch_review),
     ('compare', ('Vergleichen und Zusammenfuehren', 'Compare & Merge'), ch_compare),
     ('mod', ('In eine Mod packen', 'Packing into a mod'), ch_mod),
     ('reference', ('Referenztabellen', 'Reference tables'), ch_reference),

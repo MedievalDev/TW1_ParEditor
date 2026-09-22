@@ -7,6 +7,11 @@ A GUI editor for Two Worlds 1 `.par` parameter files — the core data format th
 ## Features
 
 - **Opens the game archives** - pick `WDFiles\Update16.wd`, the editor finds the par inside; saving writes a mod `.wd` into `Mods\`, the game archive is never touched (v1.6)
+- **Bulk edit and presets** - change one field in many entries at once (selection, list, category or search results): set, add, change by %, replace text; the field is picked by its SDK name, so `maxHP` hits the right column in every sheet; save the operation as a preset (v1.7)
+- **Review before saving** - every change since opening with old and new value; untick a row and that field keeps its old value (v1.7)
+- **Find references** - every entry that names this one in a text field, and one field across all entries (v1.7)
+- **Drag and drop** - drop a `.par`, `.wd` or JSON export from Explorer onto the window (v1.7)
+- **Error messages that help** - each error says what to try, links to the guide chapter and has a Report a bug button (v1.7)
 - **Full PAR parsing** — reads and writes the binary PAR format byte-perfectly (zlib-compressed dual-stream wrapper included)
 - **2055 SDK field names** — from the official `TwoWorlds.xls` SDK spreadsheet (39 sheets), resolved per list by the entry names, so every field carries the right name (v1.4)
 - **1178 tooltip descriptions** — hover over any field name to see what it does
@@ -178,6 +183,34 @@ These are **not separate PAR fields** — they are all part of the single `mesh`
 MIT
 
 ## Changelog
+
+### v1.7.0 (22.09.2026)
+
+- **Bulk edit.** Ctrl+B, or right-click a list, a category or several
+  selected entries (ctrl/shift-click). Pick a field by its SDK name - it is
+  field 6 in one sheet and field 9 in another, the editor finds the right
+  one per entry - then Set to / Add / Change by % / Replace text
+  (`old=>new`). The preview lists every change with old and new value;
+  ints are rounded, uint never goes below 0, arrays change item by item.
+  One Ctrl+Z undoes the whole edit.
+- **Bulk presets.** Save scope, field, operation and value under a name;
+  Edit > Bulk presets calls it up with the preview ready. Lists and
+  categories are stored by name, so a preset fits again next time.
+- **Review changes before saving.** Saving shows every changed field since
+  the file was opened; click a row or press Space to drop it, the field
+  gets its old value back and the rest is saved. Edit > Review changes...
+  shows the list any time; a checkbox in the Edit menu switches the
+  question off.
+- **Find references** (Ctrl+R): every entry that carries this entry's name
+  in a text field. Right-click a field name > **Show in all entries**:
+  that field with its value in every entry that has it. Double click jumps.
+- **Drag and drop** of `.par`, `.wd` and JSON files from Explorer.
+- **Error messages with tips.** Every error names what helps, has a
+  **Read in the guide** button for the matching chapter and a
+  **Report a bug...** button (preview first, nothing is sent without it).
+- Help > test window: open test cases for this version, with the progress
+  bar the other tools have.
+- Guide: two new chapters, Bulk edit and presets / Review and references.
 
 ### v1.6.0 (18.09.2026)
 

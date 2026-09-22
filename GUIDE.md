@@ -124,6 +124,25 @@ Right-click a list node to add a blank entry with the same field structure as ex
 
 **Import:** `File → Import JSON` — loads JSON back as PAR data (save as .par afterwards)
 
+## Bulk Edit and Presets (v1.7)
+
+Ctrl+B, or right-click a list, a category or several selected entries.
+Pick the field by name, an operation (Set to, Add, Change by %, Replace
+text `old=>new`) and a value, press **Preview**, then **Apply**. Ctrl+Z
+undoes the whole edit. **Save as preset...** stores the operation; Edit >
+Bulk presets calls it up again.
+
+## Review and References (v1.7)
+
+- Saving shows every change since opening. Click a row to drop it - that
+  field keeps its old value. Edit > Review changes before saving turns
+  this off.
+- Right-click an entry > Find references (Ctrl+R) lists every entry that
+  names it in a text field.
+- Right-click a field name > Show in all entries lists that field's value
+  in every entry.
+- Drop a `.par`, `.wd` or `.json` from Explorer onto the window to open it.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |

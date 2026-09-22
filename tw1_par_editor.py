@@ -30,6 +30,7 @@ if HAS_TK:
     import theme                       # colours, dark titlebar, Menu (PY_TOOL_DESIGN.md)
     import guidebook                   # Help > Guide (F1), ?-marks
 import updater                         # update check + self-update from GitHub
+import bulktools as BT                 # bulk edit, review, references (1.7.0)
 from version import VERSION
 from categories import CATEGORIES, SHEET_CATEGORY, NPC_PREFIXES, category_of   # noqa: F401
 
@@ -1398,6 +1399,9 @@ class ParEditorApp:
         self._invalid = {}            # field_idx -> label of fields with bad input
 
         self.update_var = tk.BooleanVar(value=bool(self.cfg.get('update_check', True)))
+        self.review_var = tk.BooleanVar(value=bool(self.cfg.get('review_before_save', True)))
+        self.orig = None                    # the par as opened - for the review before saving
+        self._init_feedback()
         self._setup_theme()
         self._build_ui()
         self._bind_keys()
@@ -1406,10 +1410,49 @@ class ParEditorApp:
         self.root.deiconify()
         self.root.after(200, self._startup)
 
+    # ── Feedback (tw1-testfenster): tests, bug reports, known issues ──
+
+    def _init_feedback(self):
+        import foxfeedback_ui
+        base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+
+        def cfg_set(key, value):
+            self.cfg[key] = value
+            self.cfg.save()
+        self.fb = foxfeedback_ui.FeedbackUI(
+            self.root, 'pareditor', VERSION,
+            cfg_get=lambda k, d=None: self.cfg.get(k, d), cfg_set=cfg_set,
+            lang=_LANG, tests_file=os.path.join(base, 'untested.json'),
+            open_guide=self.show_guide, tool_name='TW1 PAR Editor')
+        self.root.report_callback_exception = self._crash
+
+    def _crash(self, exc, val, tb):
+        import traceback
+        here = os.path.dirname(os.path.abspath(__file__))
+        frames = traceback.extract_tb(tb)
+        mine = [f for f in frames if os.path.dirname(os.path.abspath(f.filename))
+                in (here, getattr(sys, '_MEIPASS', here))]
+        where = mine[-1] if mine else (frames[-1] if frames else None)
+        spot = f'{os.path.basename(where.filename)}:{where.lineno}' if where else '?'
+        shown = ''.join(traceback.format_exception(exc, val, tb))[-3000:]
+        try:
+            self.fb.log.add(f'crash {exc.__name__} at {spot}')
+            ErrorDialog(self, 'crash', f'{exc.__name__} at {spot}', shown, title='crash: ' + exc.__name__)
+        except Exception:
+            sys.__excepthook__(exc, val, tb)
+
+    def error(self, key, message, shown, guide=None):
+        ErrorDialog(self, key, message, shown, guide)
+
     # ── Start-up: carried state, update check, selftest ──
 
     def _startup(self):
         updater.cleanup_old()
+        try:
+            import dropfiles
+            self._drop_ok = dropfiles.enable(self.root, self.on_drop) > 0
+        except Exception:
+            self._drop_ok = False
         c = self._carry
         if c.get('path') and os.path.isfile(c['path']):
             self._load_par(c['path'])
@@ -1429,6 +1472,8 @@ class ParEditorApp:
             self.root.after(1500, self.check_updates)
         if not c and not self.cfg.get('guide_seen'):
             self.root.after(700, self.guide.start)
+        if not c:
+            self.root.after(2500, self.fb.start)
 
     def _run_selftest(self):
         """PAR_EDITOR_SELFTEST=<file>: write the core facts and quit."""
@@ -1443,7 +1488,8 @@ class ParEditorApp:
             with open(self.selftest, 'w', encoding='utf-8') as f:
                 f.write(f'version={VERSION} sheets={len(self.field_labels.sheets)} '
                         f'names={self.field_labels.total} descs={len(self.field_descs.descs)} '
-                        f'chapters={len(guidebook.CHAPTERS)} https={https} '
+                        f'chapters={len(guidebook.CHAPTERS)} tests={len(self.fb.tests)} '
+                        f'drop={getattr(self, "_drop_ok", False)} https={https} '
                         f'frozen={getattr(sys, "frozen", False)}\n')
         except Exception as e:
             with open(self.selftest, 'a', encoding='utf-8') as f:
@@ -1717,6 +1763,23 @@ class ParEditorApp:
         m.add_command(label=tr("Delete entry"), command=lambda: self._delete_entry(li, ei),
                       state='normal' if has else 'disabled')
         m.add_separator()
+        m.add_command(label=tr("Bulk edit..."), accelerator="Ctrl+B", command=lambda: self.bulk_edit(),
+                      state='normal' if self.par else 'disabled')
+        presets = self.cfg.get('bulk_presets') if isinstance(self.cfg.get('bulk_presets'), dict) else {}
+        sub = theme.Menu(m)
+        for name in sorted(presets):
+            sub.add_command(label=name, command=lambda n=name: self.bulk_edit(preset=n))
+        if not presets:
+            sub.add_command(label=tr("(none yet - save one in Bulk edit)"), state='disabled')
+        m.add_cascade(label=tr("Bulk presets"), menu=sub, state='normal' if self.par else 'disabled')
+        m.add_command(label=tr("Review changes..."), command=self.review_changes,
+                      state='normal' if self.par else 'disabled')
+        m.add_checkbutton(label=tr("Review changes before saving"), variable=self.review_var,
+                          command=self._toggle_review)
+        m.add_separator()
+        m.add_command(label=tr("Find references to this entry"), accelerator="Ctrl+R",
+                      command=lambda: self.find_references(li, ei), state='normal' if has else 'disabled')
+        m.add_separator()
         m.add_command(label=tr("Filter"), accelerator="Ctrl+F",
                       command=lambda: self.search_entry.focus_set())
         m.add_command(label=tr("Next match"), accelerator="F3", command=self._search_next)
@@ -1742,6 +1805,8 @@ class ParEditorApp:
         m.add_command(label=tr("Guide"), accelerator="F1", command=self.show_guide)
         m.add_command(label=tr("Start tour"), command=self.guide.start)
         m.add_command(label=tr("Documentation"), command=lambda: webbrowser.open(GUIDE_URL))
+        m.add_separator()
+        self.fb.add_menu_items(m)
         m.add_separator()
         for name, url in LINKS:
             m.add_command(label=f'{name}  ({url})', command=lambda u=url: webbrowser.open(u))
@@ -1898,7 +1963,7 @@ class ParEditorApp:
         self.empty_box.place(relx=0.5, rely=0.38, anchor='center')
 
         self.tree = ttk.Treeview(tree_container, show='tree',
-                                  selectmode='browse')
+                                  selectmode='extended')
         tree_scroll = ttk.Scrollbar(tree_container, orient='vertical',
                                      command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_scroll.set)
@@ -1972,6 +2037,8 @@ class ParEditorApp:
                                                  self.search_entry.select_range(0, 'end')))
         self.root.bind('<F3>', lambda e: self._search_next())
         self.root.bind('<F1>', lambda e: self.show_guide())
+        self.root.bind('<Control-b>', self._key(lambda: self.bulk_edit()))
+        self.root.bind('<Control-r>', self._key(lambda: self.find_references(self.current_li, self.current_ei)))
         self.root.bind('<Control-z>', self._key(self.do_undo))
         self.root.bind('<Control-y>', self._key(self.do_redo))
         self.root.bind('<Return>', lambda e: self._search_next()
@@ -2029,6 +2096,7 @@ class ParEditorApp:
             self.undo_stack.clear()
             self.redo_stack.clear()
             self.field_labels.resolve(self.par)
+            self.orig = copy.deepcopy(self.par)
             self.empty_box.place_forget()
             self._populate_tree()
             self._update_title()
@@ -2061,7 +2129,7 @@ class ParEditorApp:
                             f"{' (zlib compressed)' if was_compressed else ''}{where}{layout}")
             return True
         except Exception as e:
-            messagebox.showerror(tr("Error"), tr("Failed to open:") + f"\n{e}")
+            self.error('open.failed', 'Opening a par or archive failed', tr("Failed to open:") + f"\n{e}", 'first')
             return False
 
     def _open_json(self):
@@ -2073,6 +2141,9 @@ class ParEditorApp:
         )
         if not path:
             return
+        self._open_json_path(path)
+
+    def _open_json_path(self, path):
         try:
             self.par = import_json(path)
             self.filepath = ''              # first save goes through Save As
@@ -2083,6 +2154,7 @@ class ParEditorApp:
             self.undo_stack.clear()
             self.redo_stack.clear()
             self.field_labels.resolve(self.par)
+            self.orig = copy.deepcopy(self.par)
             self.empty_box.place_forget()
             self._populate_tree()
             self._update_title()
@@ -2093,7 +2165,7 @@ class ParEditorApp:
                      f"{total_entries} entries")
             self._set_status(f"Imported from {Path(path).name}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to import:\n{e}")
+            self.error('import.failed', 'Importing JSON failed', tr("Failed to import:") + f"\n{e}")
 
     def _save(self):
         if not self.par:
@@ -2131,7 +2203,7 @@ class ParEditorApp:
         if not path:
             return
         if in_game_wdfiles(path):
-            messagebox.showerror(tr("Not saved"), tr("The editor never writes into the game's WDFiles folder. Save the mod into the Mods folder instead."), parent=self.root)
+            self.error('save.wdfiles', 'Saving into WDFiles was refused', tr("The editor never writes into the game's WDFiles folder. Save the mod into the Mods folder instead."), 'mod')
             return
         replace = False
         if (path.lower().endswith('.wd') and os.path.isfile(path)
@@ -2177,11 +2249,21 @@ class ParEditorApp:
             self._apply_current_edits()
             if self._invalid:
                 names = ', '.join(self._invalid.values())
-                messagebox.showerror(
-                    "Invalid values",
-                    f"Not saved. These fields hold text that is not a valid value:\n{names}\n\n"
-                    f"Fix them (red border) or restore the old value.")
+                self.error('invalid.values', 'Save refused: invalid field values',
+                           tr("Not saved. These fields hold text that is not a valid value:") + f"\n{names}", 'fields')
                 return
+            if self.review_var.get() and self.orig is not None:
+                changes = BT.diff(self.orig, self.par, self.field_labels)
+                if changes:
+                    import bulkui
+                    dlg = bulkui.ReviewDialog(self, changes, saving=True)
+                    self.root.wait_window(dlg.win)
+                    if dlg.result is None:
+                        self._set_status(tr("Not saved - back to editing."))
+                        return
+                    if dlg.result:
+                        BT.revert(self.par, dlg.result)
+                        self._refresh_after_change()
             par_data = write_par(self.par)
             backup = self._backup(path)
             size, what = write_par_target(path, self.par, par_data, replace=replace)
@@ -2192,12 +2274,13 @@ class ParEditorApp:
             self.filepath = path
             self.par.filepath = path
             self.modified = False
+            self.orig = copy.deepcopy(self.par)
             self._update_title()
             bak_str = f"  |  backup: _backup\\{os.path.basename(backup)}" if backup else ""
             hint = tr("  |  the game loads it at the next start; switch it in the Mod Manager") if what == 'wd' else ''
             self._set_status(f"Saved {Path(path).name} ({size} bytes{' (zlib)' if what == 'zlib' else ''}){bak_str}{hint}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save:\n{e}")
+            self.error('save.failed', 'Saving failed', tr("Failed to save:") + f"\n{e}", 'mod')
 
     def _export_json(self):
         if not self.par:
@@ -2217,7 +2300,7 @@ class ParEditorApp:
             export_json(self.par, path, self.field_labels)
             self._set_status(f"Exported to {Path(path).name}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to export:\n{e}")
+            self.error('export.failed', 'Exporting JSON failed', tr("Failed to export:") + f"\n{e}")
 
     def _on_close(self):
         if not self._confirm_discard():
@@ -2387,7 +2470,8 @@ class ParEditorApp:
         if not sel:
             return
 
-        item_id = sel[0]
+        focus = self.tree.focus()
+        item_id = focus if focus in sel else sel[-1]
 
         # Parse item ID (C = category, L = list, L..E.. = entry)
         if item_id.startswith('C'):
@@ -2636,6 +2720,10 @@ class ParEditorApp:
             return
         menu = theme.Menu(self.root)
         current = self.field_labels.get(sheet, field_idx)
+        name = current or f'field {field_idx}'
+        menu.add_command(label=tr("Show '{f}' in all entries").format(f=name),
+                         command=lambda: self.field_everywhere(name))
+        menu.add_separator()
         if current:
             menu.add_command(
                 label=f"Rename '{current}'...",
@@ -2649,6 +2737,100 @@ class ParEditorApp:
                 label="Set label...",
                 command=lambda: self._add_label(sheet, field_idx))
         menu.tk_popup(event.x_root, event.y_root)
+
+    # ── 1.7.0: bulk edit, review, references, drop ──
+
+    def selected_entries(self):
+        """[(li, ei)] of every entry selected in the tree."""
+        out = []
+        for iid in self.tree.selection():
+            if iid.startswith('L') and 'E' in iid:
+                a, b = iid[1:].split('E')
+                out.append((int(a), int(b)))
+        return out
+
+    def bulk_edit(self, scope=None, key=None, preset=None):
+        if not self.par:
+            return
+        self._apply_current_edits()
+        if scope is None:
+            scope = 'selected' if len(self.selected_entries()) > 1 else 'list'
+        import bulkui
+        return bulkui.BulkDialog(self, scope, key, preset)
+
+    def _refresh_after_change(self):
+        keep = (self.current_li, self.current_ei) if getattr(self, 'current_entry', None) else None
+        self._populate_tree(keep_selection=keep)
+        if keep:
+            self._show_entry(*keep)
+
+    def after_bulk(self, message):
+        self.modified = True
+        self._update_title()
+        self._refresh_after_change()
+        self._set_status(message)
+
+    def jump_to(self, li, ei):
+        if self.search_var.get():
+            self.search_var.set('')
+            self._populate_tree()
+        iid = f"L{li}E{ei}"
+        if self.tree.exists(iid):
+            self._open_list(f"L{li}")
+            self._select_iid(iid)
+            self._show_entry(li, ei)
+            self.root.lift()
+
+    def review_changes(self):
+        if not self.par or self.orig is None:
+            return
+        self._apply_current_edits()
+        changes = BT.diff(self.orig, self.par, self.field_labels)
+        if not changes:
+            self._set_status(tr("No changes since the file was opened."))
+            return
+        import bulkui
+        dlg = bulkui.ReviewDialog(self, changes, saving=False)
+        self.root.wait_window(dlg.win)
+        if dlg.result:
+            self.push_undo(('all',), tr('Drop changes'))
+            n = BT.revert(self.par, dlg.result)
+            self._refresh_after_change()
+            self._set_status(tr("{n} changes dropped - the old values are back.").format(n=n))
+
+    def _toggle_review(self):
+        self.cfg['review_before_save'] = bool(self.review_var.get())
+        self.cfg.save()
+
+    def find_references(self, li, ei):
+        if not self.par or li is None or ei is None:
+            return
+        name = self.par.lists[li].entries[ei].name
+        rows = [(rli, rei, fi, self.par.lists[rli].entries[rei].name, lab, val)
+                for rli, rei, fi, lab, val in BT.references(self.par, name, self.field_labels)]
+        import bulkui
+        bulkui.ReferencesWindow(self, tr("References to {name}").format(name=name), rows)
+
+    def field_everywhere(self, label):
+        if not self.par:
+            return
+        rows = [(li, ei, fi, name, label, val)
+                for li, ei, fi, name, val in BT.field_everywhere(self.par, self.field_labels, label)]
+        import bulkui
+        bulkui.ReferencesWindow(self, tr("'{f}' in all entries").format(f=label), rows)
+
+    def on_drop(self, paths):
+        """A .par, .wd or .json dropped from Explorer opens like File > Open."""
+        path = next((p for p in paths if p.lower().endswith(('.par', '.wd', '.json'))), None)
+        if not path:
+            self._set_status(tr("Only .par, .wd and .json files can be dropped here."))
+            return
+        if not self._confirm_discard():
+            return
+        if path.lower().endswith('.json'):
+            self._open_json_path(path) if hasattr(self, '_open_json_path') else self._set_status(tr("Use File > Open JSON for JSON files."))
+            return
+        self._load_par(path)
 
     def _add_label(self, sheet, field_idx):
         """Add a new label for a field."""
@@ -2690,14 +2872,21 @@ class ParEditorApp:
     def _tree_context_menu(self, event):
         """Show right-click context menu on tree items."""
         item_id = self.tree.identify_row(event.y)
-        if not item_id or not self.par or item_id.startswith('C'):
+        if not item_id or not self.par:
             return
 
-        # Select the item under cursor
-        self.tree.selection_set(item_id)
+        # Keep a multi selection when the click lands inside it
+        if item_id not in self.tree.selection():
+            self.tree.selection_set(item_id)
         self.tree.focus(item_id)
 
         menu = theme.Menu(self.root)
+        if item_id.startswith('C'):
+            cat = CATEGORIES[int(item_id[1:])]
+            menu.add_command(label=tr("Bulk edit category '{c}'...").format(c=tr(cat)),
+                             command=lambda: self.bulk_edit('category', cat))
+            menu.tk_popup(event.x_root, event.y_root)
+            return
 
         if item_id.startswith('L') and 'E' in item_id:
             # Entry node: L{li}E{ei}
@@ -2711,6 +2900,14 @@ class ParEditorApp:
             menu.add_command(
                 label=f"\u270E Rename '{entry.name}'...",
                 command=lambda: self._rename_entry(li, ei))
+            menu.add_command(
+                label=tr("Find references to '{name}'").format(name=entry.name),
+                command=lambda: self.find_references(li, ei))
+            n_sel = len(self.selected_entries())
+            menu.add_command(
+                label=tr("Bulk edit {n} selected entries...").format(n=n_sel) if n_sel > 1
+                else tr("Bulk edit..."),
+                command=lambda: self.bulk_edit('selected' if n_sel > 1 else 'list', li if n_sel <= 1 else None))
             menu.add_separator()
             menu.add_command(
                 label=f"\u2716 Delete '{entry.name}'",
@@ -2720,6 +2917,9 @@ class ParEditorApp:
             # List node
             li = int(item_id[1:])
             pl = self.par.lists[li]
+            menu.add_command(
+                label=tr("Bulk edit this list..."),
+                command=lambda: self.bulk_edit('list', li))
             menu.add_command(
                 label=f"Add New Entry to List {li}...",
                 command=lambda: self._add_entry_to_list(li))
@@ -3249,7 +3449,7 @@ class ParEditorApp:
             self.field_labels.resolve(par)
             return par, path
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load PAR:\n{e}")
+            self.error('open.failed', 'Opening a par for Compare failed', tr("Failed to open:") + f"\n{e}", 'compare')
             return None, ''
 
     def _cmp_load_source(self):
@@ -3701,7 +3901,7 @@ class ParEditorApp:
                 text=f"Saved to {Path(path).name} ({len(self.cmp_source.lists)} lists, {total} entries)")
             self._set_status(f"Saved merged PAR to {Path(path).name}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save:\n{e}")
+            self.error('save.failed', 'Saving the merged par failed', tr("Failed to save:") + f"\n{e}", 'compare')
 
     # ── Helpers ──
 
@@ -3762,6 +3962,71 @@ def cli_export(par_path, json_path):
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# What helps, per error key: (guide chapter, tip EN, tip DE). Shown above the
+# technical text of every error, with a button to that chapter and "Report a bug".
+ERROR_TIPS = {
+    'open.failed': ('first',
+        'Open WDFiles\\Update16.wd of the game, not Parameters.wd (old layout). A mod .wd must carry Parameters\\TwoWorlds.par. If the file came from somewhere else, try it once in the TW1 WD Packer.',
+        'Die WDFiles\\Update16.wd des Spiels oeffnen, nicht Parameters.wd (altes Layout). Eine Mod-.wd muss Parameters\\TwoWorlds.par enthalten. Kommt die Datei von woanders, einmal im TW1 WD Packer pruefen.'),
+    'save.failed': ('mod',
+        'Is the file open in another program or write-protected? Is Two Worlds running with this archive? Save under a new name into the Mods folder.',
+        'Ist die Datei in einem anderen Programm offen oder schreibgeschuetzt? Laeuft Two Worlds mit diesem Archiv? Unter neuem Namen in den Mods-Ordner speichern.'),
+    'save.wdfiles': ('mod',
+        'The game archives stay untouched on purpose. Save into <game>\\Mods as a new .wd and switch it on in the TW1 Mod Manager.',
+        'Die Spielarchive bleiben absichtlich unberuehrt. Als neue .wd nach <Spiel>\\Mods speichern und im TW1 Mod Manager einschalten.'),
+    'import.failed': ('trouble',
+        'Only JSON files written by File > Export JSON can be read back.',
+        'Nur JSON-Dateien aus Datei > JSON exportieren lassen sich wieder einlesen.'),
+    'invalid.values': ('fields',
+        'Fields with a red border hold text that is not a number of their type. Fix them, or press Ctrl+Z to get the old value back.',
+        'Felder mit rotem Rand enthalten Text, der keine Zahl ihres Typs ist. Korrigieren, oder mit Strg+Z den alten Wert zurueckholen.'),
+    'export.failed': ('trouble',
+        'Pick a folder you can write to, for example Documents, and try again.',
+        'Einen Ordner waehlen, in den du schreiben darfst, zum Beispiel Dokumente, und noch einmal.'),
+    'crash': ('trouble',
+        'Please report it: the log goes with it, and nothing is sent before you have seen it.',
+        'Bitte melden: das Protokoll geht mit, und nichts wird verschickt, bevor du es gesehen hast.'),
+}
+
+
+class ErrorDialog:
+    """An error with what helps, a button to the guide and "Report a bug"."""
+
+    def __init__(self, app, key, message, shown, guide=None, title=None):
+        self.win = win = tk.Toplevel(app.root)
+        win.title(tr('Error'))
+        win.configure(background=theme.BG)
+        win.transient(app.root)
+        theme.dark_titlebar(win)
+        win.bind('<Escape>', lambda e: win.destroy())
+        f = ttk.Frame(win, padding=16)
+        f.pack(fill='both', expand=True)
+        chapter, tip_en, tip_de = ERROR_TIPS.get(key, ('trouble', '', ''))
+        guide = guide or chapter
+        tip = tip_de if _LANG == 'de' else tip_en
+        if tip:
+            ttk.Label(f, text=tr('What helps'), style='H2.TLabel').pack(anchor='w')
+            ttk.Label(f, text=tip, wraplength=620, justify='left').pack(anchor='w', pady=(2, 10))
+        box = tk.Text(f, wrap='word', height=min(14, max(3, shown.count(chr(10)) + 2 + len(shown) // 90)),
+                      width=86, bg=theme.FIELD, fg=theme.INK, relief='flat', font=('Consolas', 9),
+                      highlightthickness=0, padx=8, pady=6)
+        box.insert('1.0', shown)
+        box.configure(state='disabled')
+        box.pack(fill='both', expand=True)
+        btns = ttk.Frame(f)
+        btns.pack(fill='x', pady=(12, 0))
+        ttk.Button(btns, text='OK', style='Accent.TButton', command=win.destroy).pack(side='right')
+        ttk.Button(btns, text=tr('Report a bug...'),
+                   command=lambda: app.fb.report_bug(parent=win, error_text=shown, error_key=key,
+                                                     title=title or f'{key}: {message}', fp_text=message)
+                   ).pack(side='right', padx=6)
+        ttk.Button(btns, text=tr('Read in the guide'), command=lambda: app.show_guide(guide)).pack(side='left')
+        win.update_idletasks()
+        win.geometry(f'+{app.root.winfo_rootx() + 80}+{app.root.winfo_rooty() + 80}')
+        win.lift()
+        win.focus_force()
+
 
 class UpdateWindow:
     """A newer release exists: notes, update now, later, skip (design 9)."""
@@ -3882,6 +4147,78 @@ def run_gui(path=None):
 # ------------------------------------------------------------------ Deutsch --
 
 DE = {
+    # 1.7.0: bulk edit, presets, review, references, errors
+    "'{f}' in all entries": "'{f}' in allen Eintraegen",
+    '(none yet - save one in Bulk edit)': '(noch keine - in Massenbearbeitung speichern)',
+    'Add': 'Addieren',
+    'Apply': 'Anwenden',
+    'Bulk edit': 'Massenbearbeitung',
+    "Bulk edit category '{c}'...": "Kategorie '{c}' gemeinsam bearbeiten...",
+    'Bulk edit this list...': 'Diese Liste gemeinsam bearbeiten...',
+    'Bulk edit {n} selected entries...': '{n} gewaehlte Eintraege gemeinsam bearbeiten...',
+    'Bulk edit...': 'Massenbearbeitung...',
+    'Bulk edit: {n} fields changed ({field}). Undo with Ctrl+Z.': 'Massenbearbeitung: {n} Felder geaendert ({field}). Rueckgaengig mit Strg+Z.',
+    'Bulk presets': 'Vorlagen fuer Massenbearbeitung',
+    'Category': 'Kategorie',
+    'Change by %': 'Um % aendern',
+    'Click a row (or press Space) to keep or drop it. Dropped changes get their old value back.': 'Eine Zeile anklicken (oder Leertaste), um sie zu behalten oder zu verwerfen. Verworfene Aenderungen bekommen ihren alten Wert zurueck.',
+    'Delete preset': 'Vorlage loeschen',
+    'Delete the preset {name}?': 'Die Vorlage {name} loeschen?',
+    'Done: {n} fields changed.': 'Fertig: {n} Felder geaendert.',
+    'Drop all': 'Alle verwerfen',
+    'Drop changes': 'Aenderungen verwerfen',
+    'Drop the unticked': 'Nicht angehakte verwerfen',
+    'Enter a value first.': 'Zuerst einen Wert eingeben.',
+    'Failed to export:': 'Export fehlgeschlagen:',
+    'Failed to import:': 'Import fehlgeschlagen:',
+    'Failed to save:': 'Speichern fehlgeschlagen:',
+    'Field': 'Feld',
+    "Find references to '{name}'": "Verweise auf '{name}' suchen",
+    'Find references to this entry': 'Verweise auf diesen Eintrag suchen',
+    'Keep all': 'Alle behalten',
+    'List': 'Liste',
+    'Name of the preset:': 'Name der Vorlage:',
+    'No changes since the file was opened.': 'Keine Aenderungen, seit die Datei geoeffnet wurde.',
+    'Not saved - back to editing.': 'Nicht gespeichert - zurueck zum Bearbeiten.',
+    'Not saved. These fields hold text that is not a valid value:': 'Nicht gespeichert. Diese Felder enthalten Text, der kein gueltiger Wert ist:',
+    'Nothing found.': 'Nichts gefunden.',
+    'Only .par, .wd and .json files can be dropped here.': 'Hier lassen sich nur .par-, .wd- und .json-Dateien ablegen.',
+    'Operation': 'Aktion',
+    'Pick a field and an operation, then Preview.': 'Ein Feld und eine Aktion waehlen, dann Vorschau.',
+    'Preset': 'Vorlage',
+    'Preset saved.': 'Vorlage gespeichert.',
+    'Preview': 'Vorschau',
+    'Read in the guide': 'Im Guide nachlesen',
+    'References to {name}': 'Verweise auf {name}',
+    'Replace text (old=>new)': 'Text ersetzen (alt=>neu)',
+    'Report a bug...': 'Bug melden...',
+    'Review changes': 'Aenderungen pruefen',
+    'Review changes before saving': 'Aenderungen vor dem Speichern pruefen',
+    'Review changes...': 'Aenderungen pruefen...',
+    'Save as preset': 'Als Vorlage speichern',
+    'Save as preset...': 'Als Vorlage speichern...',
+    'Search results': 'Suchergebnisse',
+    'Selected entries': 'Gewaehlte Eintraege',
+    'Set to': 'Setzen auf',
+    "Show '{f}' in all entries": "'{f}' in allen Eintraegen zeigen",
+    'That value does not fit the field: {e}': 'Der Wert passt nicht zum Feld: {e}',
+    'Use File > Open JSON for JSON files.': 'JSON-Dateien ueber Datei > JSON oeffnen laden.',
+    'Value': 'Wert',
+    'What helps': 'Was hilft',
+    'Which entries': 'Welche Eintraege',
+    'entry added': 'Eintrag hinzugefuegt',
+    'entry removed': 'Eintrag entfernt',
+    'the list shows the first 2000': 'die Liste zeigt die ersten 2000',
+    '{k} entries added or removed (undo those with Ctrl+Z).': '{k} Eintraege hinzugefuegt oder entfernt (die mit Strg+Z zuruecknehmen).',
+    '{k} entries have no such field and stay as they are': '{k} Eintraege haben kein solches Feld und bleiben, wie sie sind',
+    '{n} changes': '{n} Aenderungen',
+    '{n} changes dropped - the old values are back.': '{n} Aenderungen verworfen - die alten Werte sind zurueck.',
+    '{n} fields changed since the file was opened.': '{n} Felder geaendert, seit die Datei geoeffnet wurde.',
+    '{n} places. Double click jumps there.': '{n} Stellen. Doppelklick springt hin.',
+    'Entry': 'Eintrag',
+    'Old': 'Alt',
+    'New': 'Neu',
+    'Keep': 'Behalten',
     'Category:': 'Gruppe:', 'All': 'Alle', 'Player': 'Spieler', 'NPCs': 'NPCs', 'Enemies': 'Gegner',
     'Animals & Mounts': 'Tiere & Reittiere', 'Weapons & Missiles': 'Waffen & Geschosse',
     'Armour & Equipment': 'Ruestung & Ausruestung', 'Magic & Effects': 'Magie & Effekte',
