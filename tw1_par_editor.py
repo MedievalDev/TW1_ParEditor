@@ -1861,6 +1861,8 @@ class ParEditorApp:
                              "weapon, spell, potion and object. Field names from the SDK sheets,\n"
                              "byte-identical round trip, compare & merge between two files."),
                   style='Muted.TLabel', justify='left').pack(anchor='w', pady=(6, 10))
+        ttk.Label(f, text=tr("Thanks to KithMyAthXo (Discord) for feature requests and feedback."),
+                  style='Muted.TLabel', justify='left').pack(anchor='w', pady=(0, 10))
         for name, url in LINKS:
             lnk = ttk.Label(f, text=f'{name}: {url}', style='Link.TLabel', cursor='hand2')
             lnk.pack(anchor='w', padx=(12, 0))
@@ -4556,6 +4558,7 @@ def run_gui(path=None):
 # ------------------------------------------------------------------ Deutsch --
 
 DE = {
+    'Thanks to KithMyAthXo (Discord) for feature requests and feedback.': 'Danke an KithMyAthXo (Discord) fuer Wuensche und Rueckmeldungen.',
     # 1.8.0: marks, game values, favourites, templates, csv, jump box
     '(no template for this sheet yet)': '(noch keine Vorlage fuer dieses Blatt)',
     '(none yet - right-click an entry)': '(noch keine - Rechtsklick auf einen Eintrag)',

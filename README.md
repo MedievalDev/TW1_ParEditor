@@ -179,6 +179,7 @@ These are **not separate PAR fields** — they are all part of the single `mesh`
 ## Credits
 
 - **Reality Pump Studios** — Two Worlds game engine and SDK
+- **KithMyAthXo** (Discord) — feature requests and feedback: opening `.wd` archives directly, drag & drop, bulk edit with presets, review before saving, find references
 - PAR format reverse-engineered from binary analysis and SDK correlation
 - Field labels extracted from `TwoWorlds.xls` (SDK)
 - Class hierarchy from `classmask.h` (SDK)
