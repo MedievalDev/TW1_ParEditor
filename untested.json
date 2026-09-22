@@ -16,14 +16,14 @@
     "de": [
      "WDFiles\\Update16.wd oeffnen.",
      "Rechtsklick auf die Kategorie Gegner > gemeinsam bearbeiten.",
-     "Feld maxHP, Aktion Um % aendern, Wert 50, Vorschau, Anwenden.",
+     "Feld initParamHP, Aktion Um % aendern, Wert 50, Vorschau, Anwenden.",
      "Speichern (als Mod in den Mods-Ordner), im Mod Manager einschalten.",
      "Spiel starten, einen Gegner angreifen."
     ],
     "en": [
      "Open WDFiles\\Update16.wd.",
      "Right-click the Enemies category > bulk edit.",
-     "Field maxHP, operation Change by %, value 50, Preview, Apply.",
+     "Field initParamHP, operation Change by %, value 50, Preview, Apply.",
      "Save (as a mod into the Mods folder), enable it in the Mod Manager.",
      "Start the game, attack an enemy."
     ]

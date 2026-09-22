@@ -7,7 +7,7 @@ A GUI editor for Two Worlds 1 `.par` parameter files — the core data format th
 ## Features
 
 - **Opens the game archives** - pick `WDFiles\Update16.wd`, the editor finds the par inside; saving writes a mod `.wd` into `Mods\`, the game archive is never touched (v1.6)
-- **Bulk edit and presets** - change one field in many entries at once (selection, list, category or search results): set, add, change by %, replace text; the field is picked by its SDK name, so `maxHP` hits the right column in every sheet; save the operation as a preset (v1.7)
+- **Bulk edit and presets** - change one field in many entries at once (selection, list, category or search results): set, add, change by %, replace text; the field is picked by its SDK name, so field 34 is `initParamHP` for units and `wpDamColdMax` for weapons - the name decides; save the operation as a preset (v1.7)
 - **Review before saving** - every change since opening with old and new value; untick a row and that field keeps its old value (v1.7)
 - **Find references** - every entry that names this one in a text field, and one field across all entries (v1.7)
 - **Drag and drop** - drop a `.par`, `.wd` or JSON export from Explorer onto the window (v1.7)
@@ -183,6 +183,14 @@ These are **not separate PAR fields** — they are all part of the single `mesh`
 MIT
 
 ## Changelog
+
+### v1.7.1 (22.09.2026)
+
+- Guide and examples use `initParamHP` for unit hit points: `maxHP` is 10
+  in every unit, the value the game scales is `initParamHP` (wolf 80,
+  skeleton 100). The bulk-edit chapter no longer claims a field sits at
+  different numbers in different sheets - it is the other way round, one
+  number means different fields.
 
 ### v1.7.0 (22.09.2026)
 

@@ -494,7 +494,8 @@ def ch_bulk():
     return _l("""# Massenbearbeitung und Vorlagen
 
 Ein Feld in vielen Eintraegen auf einmal aendern: zum Beispiel allen Gegnern
-20 % mehr Lebenspunkte geben.
+20 % mehr Lebenspunkte geben (`initParamHP` - `maxHP` steht bei Einheiten
+ueberall auf 10).
 
 1. **Welche Eintraege** festlegen: im Baum mehrere Eintraege mit Strg oder
    Umschalt anklicken, oder per Rechtsklick auf eine Liste oder eine
@@ -503,8 +504,9 @@ Ein Feld in vielen Eintraegen auf einmal aendern: zum Beispiel allen Gegnern
    (Strg+B) oeffnet dasselbe Fenster.
 2. **Feld** waehlen. Die Liste zeigt jedes Feld mit dem Namen aus dem SDK
    und in wie vielen Eintraegen es vorkommt. Gewaehlt wird nach Namen, nicht
-   nach Nummer: `maxHP` ist in einer Liste Feld 6, in einer anderen Feld 9.
-   Eintraege ohne dieses Feld bleiben, wie sie sind - die Vorschau zaehlt sie.
+   nach Nummer: Feld 34 ist bei Einheiten `initParamHP`, bei Waffen
+   `wpDamColdMax`. Eintraege ohne dieses Feld bleiben, wie sie sind - die
+   Vorschau zaehlt sie.
 3. **Aktion** und **Wert** eingeben, dann **Vorschau**. Die Liste zeigt jede
    Aenderung mit altem und neuem Wert.
 4. **Anwenden**. Die Aenderung ist mit Strg+Z rueckgaengig.
@@ -512,15 +514,15 @@ Ein Feld in vielen Eintraegen auf einmal aendern: zum Beispiel allen Gegnern
 """, """# Bulk edit and presets
 
 Change one field in many entries at once: give every enemy 20 % more hit
-points, for example.
+points, for example (`initParamHP` - `maxHP` is 10 for every unit).
 
 1. Set **which entries**: ctrl- or shift-click several entries in the tree,
    or right-click a list or a category and choose **bulk edit**. The current
    search results work too. Edit > Bulk edit (Ctrl+B) opens the same window.
 2. Pick the **field**. The list shows every field with its SDK name and in
-   how many entries it occurs. It is chosen by name, not by number: `maxHP`
-   is field 6 in one list and field 9 in another. Entries without that field
-   stay as they are - the preview counts them.
+   how many entries it occurs. It is chosen by name, not by number: field 34
+   is `initParamHP` for units and `wpDamColdMax` for weapons. Entries without
+   that field stay as they are - the preview counts them.
 3. Enter **operation** and **value**, then **Preview**. The list shows every
    change with the old and the new value.
 4. **Apply**. Ctrl+Z undoes it.
